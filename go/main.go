@@ -659,6 +659,11 @@ func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
+	// Best effort, and only that: a docker kill never calls this, so the real
+	// upper bound on lost observations stays observationsFlushInterval. Before
+	// taking state.mu because it acquires a different lock.
+	flushObservationsNow()
+
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.buckets = make(map[string]templateEntry)
@@ -847,6 +852,12 @@ func configure(raw []byte) error {
 	cleared, _ := swapConfigLocked(cfg)
 	state.configErrors = scopeProblems
 	state.mu.Unlock()
+
+	// Outside state.mu: loadObservations takes its own lock and must never be
+	// reached while holding this one. It is a no-op when store_dir has not
+	// changed, which matters because the host reconfigures constantly and the
+	// operator is watching these counts.
+	loadObservations(cfg.StoreDir)
 
 	if forcedInband {
 		log.Printf(logPrefix + "config error: harvest_inband is not allowed for role=business, forced to false")
@@ -1173,6 +1184,11 @@ func interceptAfterAuth(raw []byte) ([]byte, error) {
 	if replacement == "" || cfg.DryRun {
 		return noop()
 	}
+	// Past this point the template really is going upstream, so the response
+	// side may count this request as injected. Deliberately after the dry_run
+	// check: dry_run exists to watch without touching, and a tally that called
+	// that an injection would misreport the one mode used for observing.
+	markRequestWrote(req.RequestID)
 	// Return only the one header. The host preserves every header not named
 	// here, so this cannot disturb the rest of the request.
 	//
@@ -1267,6 +1283,11 @@ func observeWebSocketEvent(raw []byte) ([]byte, error) {
 // selected, merely carried across a hook boundary that drops it.
 type pendingAuthEntry struct {
 	authID string
+	// wrote reports whether the request actually went upstream carrying a
+	// template we put there. Set after the decision, not with it: a dry_run
+	// decision is not a write, and the observation tally's whole
+	// natural-vs-injected split collapses if intent is counted as action.
+	wrote  bool
 	seenAt time.Time
 }
 
@@ -1303,24 +1324,46 @@ func rememberRequestAuth(requestID, authID string) {
 	pendingAuth.byID[requestID] = pendingAuthEntry{authID: authID, seenAt: now}
 }
 
-// recallRequestAuth returns the credential recorded for this request and forgets
-// it: one request yields one response, so holding the entry afterwards is pure
-// leak. An entry older than pendingAuthTTL is treated as absent.
-func recallRequestAuth(requestID string) string {
+// markRequestWrote records that the request hook really did put a template on
+// the outgoing request. Separate from rememberRequestAuth because the account
+// is known before the decision and the decision is known after.
+//
+// A missing entry is not an error: rememberRequestAuth only records an OBSERVED
+// account, so a request attributed by inference has nothing to mark. The
+// observation is then dropped for want of attribution, which is the right
+// outcome -- a guessed account on a throttling tally would blame the wrong
+// customer.
+func markRequestWrote(requestID string) {
 	if requestID == "" {
-		return ""
+		return
+	}
+	pendingAuth.mu.Lock()
+	defer pendingAuth.mu.Unlock()
+	if entry, ok := pendingAuth.byID[requestID]; ok {
+		entry.wrote = true
+		pendingAuth.byID[requestID] = entry
+	}
+}
+
+// recallRequestRecord returns what the request hook recorded for this request
+// and forgets it: one request yields one response, so holding the entry
+// afterwards is pure leak. An entry older than pendingAuthTTL is treated as
+// absent.
+func recallRequestRecord(requestID string) (authID string, wrote bool) {
+	if requestID == "" {
+		return "", false
 	}
 	pendingAuth.mu.Lock()
 	defer pendingAuth.mu.Unlock()
 	entry, ok := pendingAuth.byID[requestID]
 	if !ok {
-		return ""
+		return "", false
 	}
 	delete(pendingAuth.byID, requestID)
 	if time.Since(entry.seenAt) > pendingAuthTTL {
-		return ""
+		return "", false
 	}
-	return entry.authID
+	return entry.authID, entry.wrote
 }
 
 // harvestFromResponse is the one place a template enters the store. Everything
@@ -1329,16 +1372,29 @@ func recallRequestAuth(requestID string) string {
 // whole probing window.
 func harvestFromResponse(cfg pluginConfig, headers http.Header, metadata map[string]any, model, requestID string) {
 	value := headerValue(headers, turnStateHeader)
-	if value == "" {
-		return
-	}
+
+	// Take the request-side record first, and unconditionally. It is consumed
+	// on read, and both the observation below and the attribution further down
+	// need it -- reading it twice would hand the second caller nothing.
+	relayedAuth, wrote := recallRequestRecord(requestID)
+
 	authID := metadataString(metadata, selectedAuthMetadataKey)
 	if authID == "" {
 		// Expected on this hook, not exceptional: the response side is handed a
 		// different metadata map than the request side, so the name is never
 		// there. Recover it by RequestID from what the request hook recorded --
 		// see pendingAuth. Still the account CPA selected, not a guess.
-		authID = recallRequestAuth(requestID)
+		authID = relayedAuth
+	}
+
+	// Before the empty check, deliberately. A response carrying no state at all
+	// is the signal that the template we injected was ACCEPTED -- the upstream
+	// had no reason to sign a new one. Skipping silence would leave every
+	// healthy bucket looking unobserved. See bucketObservation.
+	recordObservation(cfg, authID, model, len(value), wrote)
+
+	if value == "" {
+		return
 	}
 	attribution := attributionObserved
 

@@ -716,11 +716,35 @@ func TestInBandHarvestAttributesByRequestID(t *testing.T) {
 // left in place, a recycled id would file someone else's 292 in this bucket.
 func TestInBandHarvestForgetsAfterUse(t *testing.T) {
 	rememberRequestAuth("req-once", "codex-alpha.json")
-	if got := recallRequestAuth("req-once"); got != "codex-alpha.json" {
+	got, wrote := recallRequestRecord("req-once")
+	if got != "codex-alpha.json" {
 		t.Fatalf("first recall = %q, want the recorded account", got)
 	}
-	if got := recallRequestAuth("req-once"); got != "" {
+	if wrote {
+		t.Error("first recall reports the request was injected; markRequestWrote was never called")
+	}
+	if got, _ = recallRequestRecord("req-once"); got != "" {
 		t.Fatalf("second recall = %q, want empty: the entry must be consumed", got)
+	}
+}
+
+// markRequestWrote is what tells the response side an injection really went
+// out. It runs after the dry_run check, so the flag must survive the round trip
+// or every injected observation is miscounted as natural.
+func TestRequestWriteFlagSurvivesRecall(t *testing.T) {
+	rememberRequestAuth("req-wrote", "codex-alpha.json")
+	markRequestWrote("req-wrote")
+	got, wrote := recallRequestRecord("req-wrote")
+	if got != "codex-alpha.json" || !wrote {
+		t.Fatalf("recall = (%q, %v), want the account with wrote=true", got, wrote)
+	}
+
+	// An unknown id must not create an entry: rememberRequestAuth records only
+	// an observed account, and marking a request it skipped would resurrect one
+	// with an empty account.
+	markRequestWrote("req-never-seen")
+	if got, _ := recallRequestRecord("req-never-seen"); got != "" {
+		t.Errorf("marking an unknown request created an entry with account %q", got)
 	}
 }
 
