@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -42,7 +43,7 @@ func observedBucket(t *testing.T, auth, model string) bucketObservation {
 	return bucketObservation{}
 }
 
-// The four readings the dashboard renders, each landing in its own counter.
+// Every reading the dashboard renders, each landing in its own counter.
 func TestObservationSplitsNaturalFromInjected(t *testing.T) {
 	cfg := resetObservations(t, "")
 
@@ -52,6 +53,7 @@ func TestObservationSplitsNaturalFromInjected(t *testing.T) {
 	recordObservation(cfg, "a.json", "gpt-5.5", 312, true)  // degraded despite ours
 	recordObservation(cfg, "a.json", "gpt-5.5", 292, true)  // fresh good despite ours
 	recordObservation(cfg, "a.json", "gpt-5.5", 99, false)  // unrecognised length
+	recordObservation(cfg, "a.json", "gpt-5.5", 99, true)   // unrecognised, and ours went out
 
 	cell := observedBucket(t, "a.json", "gpt-5.5")
 	for _, want := range []struct {
@@ -65,10 +67,136 @@ func TestObservationSplitsNaturalFromInjected(t *testing.T) {
 		{"InjectedSilent", cell.InjectedSilent, 1},
 		{"InjectedLimited", cell.InjectedLimited, 1},
 		{"InjectedNormal", cell.InjectedNormal, 1},
+		{"InjectedOther", cell.InjectedOther, 1},
 	} {
 		if want.got != want.n {
 			t.Errorf("%s = %d, want %d", want.name, want.got, want.n)
 		}
+	}
+}
+
+// An unrecognised length on a request we injected into belongs on the injected
+// side. It used to fall through to NaturalOther, which put our own traffic in
+// the unprompted counts -- the one place a reader is entitled to treat the
+// numbers as a rate.
+func TestInjectedUnrecognisedLengthStaysOffTheNaturalSide(t *testing.T) {
+	cfg := resetObservations(t, "")
+
+	recordObservation(cfg, "a.json", "gpt-5.5", 99, true)
+
+	cell := observedBucket(t, "a.json", "gpt-5.5")
+	if cell.InjectedOther != 1 {
+		t.Errorf("InjectedOther = %d, want 1", cell.InjectedOther)
+	}
+	if cell.NaturalOther != 0 {
+		t.Errorf("NaturalOther = %d, want 0: this observation was prompted by our own injection", cell.NaturalOther)
+	}
+	if cell.LastNaturalKind != "" {
+		t.Errorf("LastNaturalKind = %q, want empty: nothing unprompted has been seen in this bucket", cell.LastNaturalKind)
+	}
+}
+
+// LastSigned* is what the dashboard ages, and it must advance on ANY reading
+// where the upstream put a state on the wire. A 292 signed on a request we had
+// injected into is the upstream saying it serves this account normally -- the
+// most direct evidence available, and it used to be filed as no evidence at
+// all, leaving a healthy bucket showing "blind" while holding the proof.
+func TestLastSignedTracksInjectedReadingsToo(t *testing.T) {
+	cfg := resetObservations(t, "")
+
+	recordObservation(cfg, "a.json", "gpt-5.5", 292, true)
+
+	cell := observedBucket(t, "a.json", "gpt-5.5")
+	if cell.LastSignedKind != observationNormal || cell.LastSignedAt == "" {
+		t.Errorf("LastSigned = %q at %q, want a normal reading with a timestamp", cell.LastSignedKind, cell.LastSignedAt)
+	}
+	if !cell.LastSignedWrote {
+		t.Error("LastSignedWrote is false; the page needs to say this reading came from a request we touched")
+	}
+	if cell.LastNaturalKind != "" {
+		t.Errorf("LastNaturalKind = %q, want empty: the natural side stays unprompted-only", cell.LastNaturalKind)
+	}
+
+	// Silence never counts as a signed state: under injection it means our own
+	// template was accepted, which is nobody signing anything.
+	recordObservation(cfg, "a.json", "gpt-5.5", 0, true)
+	if cell := observedBucket(t, "a.json", "gpt-5.5"); cell.LastSignedKind != observationNormal {
+		t.Errorf("LastSignedKind = %q after a silent response, want it unchanged at normal", cell.LastSignedKind)
+	}
+}
+
+// The history exists so "is this worse than yesterday" has an answer. Lifetime
+// totals cannot give one.
+func TestHourlyHistoryRollsUpAndStaysBounded(t *testing.T) {
+	cfg := resetObservations(t, "")
+	recordObservation(cfg, "a.json", "gpt-5.5", 312, false)
+
+	cell := observedBucket(t, "a.json", "gpt-5.5")
+	if len(cell.Hourly) != 1 {
+		t.Fatalf("Hourly has %d slot(s), want 1", len(cell.Hourly))
+	}
+	if cell.Hourly[0].NaturalLimited != 1 {
+		t.Errorf("this hour's NaturalLimited = %d, want 1", cell.Hourly[0].NaturalLimited)
+	}
+
+	// A second observation in the same hour reuses the slot rather than
+	// opening another; otherwise the ring holds minutes, not days.
+	recordObservation(cfg, "a.json", "gpt-5.5", 312, false)
+	if cell := observedBucket(t, "a.json", "gpt-5.5"); len(cell.Hourly) != 1 {
+		t.Errorf("Hourly has %d slot(s) after a second observation in the same hour, want 1", len(cell.Hourly))
+	}
+
+	now := time.Now()
+	if got := observedBucket(t, "a.json", "gpt-5.5").rollup(now, 24*time.Hour); got.NaturalLimited != 2 {
+		t.Errorf("24h rollup NaturalLimited = %d, want 2", got.NaturalLimited)
+	}
+
+	// Hours outside the window are excluded rather than summed in.
+	stale := bucketObservation{Hourly: []hourlyObservation{
+		{Hour: now.Add(-40 * time.Hour).UTC().Truncate(time.Hour).Format(time.RFC3339),
+			observationCounts: observationCounts{NaturalLimited: 500}},
+		{Hour: now.Add(-2 * time.Hour).UTC().Truncate(time.Hour).Format(time.RFC3339),
+			observationCounts: observationCounts{NaturalLimited: 7}},
+	}}
+	if got := stale.rollup(now, 24*time.Hour); got.NaturalLimited != 7 {
+		t.Errorf("24h rollup over a 40h-old slot = %d, want 7: the old hour must not be counted", got.NaturalLimited)
+	}
+
+	// The ring is capped. Past the cap the oldest hour goes, not the newest.
+	var ring bucketObservation
+	for i := observationsHourlyMax + 10; i >= 0; i-- {
+		ring.hourSlot(now.Add(-time.Duration(i)*time.Hour)).add(false, observationLimited)
+	}
+	if len(ring.Hourly) != observationsHourlyMax {
+		t.Errorf("ring holds %d slot(s), want the cap of %d", len(ring.Hourly), observationsHourlyMax)
+	}
+	newest := now.UTC().Truncate(time.Hour).Format(time.RFC3339)
+	if ring.Hourly[len(ring.Hourly)-1].Hour != newest {
+		t.Errorf("newest slot is %q, want %q: eviction must drop the oldest",
+			ring.Hourly[len(ring.Hourly)-1].Hour, newest)
+	}
+}
+
+// addAll is hand-written, so a counter added to the struct and forgotten here
+// would silently read as zero in every rollup. Walk the type instead of
+// trusting the list.
+func TestObservationCountsAddAllCoversEveryField(t *testing.T) {
+	var src observationCounts
+	value := reflect.ValueOf(&src).Elem()
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Field(i)
+		if field.Kind() != reflect.Int64 {
+			t.Fatalf("observationCounts.%s is a %s; this test assumes every counter is an int64",
+				value.Type().Field(i).Name, field.Kind())
+		}
+		field.SetInt(int64(i + 1)) // distinct, so a copied-wrong field shows up
+	}
+
+	var dst observationCounts
+	dst.addAll(src)
+	if dst != src {
+		t.Errorf("addAll dropped or misplaced a counter.\n got: %+v\nwant: %+v\n"+
+			"every field of observationCounts needs a line in addAll", dst, src)
 	}
 }
 
@@ -220,7 +348,11 @@ func TestObservationSnapshotRejectsForeignVersion(t *testing.T) {
 
 	raw, _ := json.Marshal(observationSnapshot{
 		Version: observationsVersion + 1,
-		Buckets: []bucketObservation{{AuthID: "a.json", Model: "gpt-5.5", NaturalLimited: 99}},
+		Buckets: []bucketObservation{{
+			AuthID:            "a.json",
+			Model:             "gpt-5.5",
+			observationCounts: observationCounts{NaturalLimited: 99},
+		}},
 	})
 	if errWrite := os.WriteFile(filepath.Join(dir, observationsFileName), raw, 0o600); errWrite != nil {
 		t.Fatalf("seed snapshot: %v", errWrite)

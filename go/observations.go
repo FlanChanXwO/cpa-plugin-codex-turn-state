@@ -11,10 +11,13 @@
 // traffic that was happening anyway, which is what makes it safe to run
 // permanently while active probing stays off.
 //
-// It deliberately does NOT keep a time series. Counts are lifetime-since-Since,
-// plus a bounded ring of recent events. Trends belong in the decision log,
-// which any cron can roll up at no storage cost; a plugin that grows a metrics
-// database has stopped being a plugin.
+// What it keeps is deliberately shallow: lifetime counts since Since, the same
+// counts per hour for the last two days, and a bounded ring of recent events.
+// The hourly ring exists because lifetime totals cannot answer "is this worse
+// than yesterday", which is the actual question. Anything finer -- per-request
+// history, retention past two days, arbitrary ranges -- belongs in the decision
+// log, which any cron can roll up at no storage cost. A plugin that grows a
+// metrics database has stopped being a plugin.
 
 package main
 
@@ -41,7 +44,10 @@ const (
 	// never be migration code here. This is a discardable observation snapshot,
 	// not contract data: the cost of dropping it is losing counts, and the cost
 	// of carrying migrations for it forever is higher.
-	observationsVersion = 1
+	//
+	// 2: added the hourly history and split injected-other out of
+	// natural_other, which changes what an existing natural_other means.
+	observationsVersion = 2
 
 	// observationsRecentMax bounds the live feed. It rides on the status
 	// document, which the dashboard polls, so this is also a bound on that
@@ -52,6 +58,13 @@ const (
 	// would otherwise grow the map without limit; past this the least recently
 	// seen bucket is dropped.
 	observationsBucketMax = 256
+
+	// observationsHourlyMax bounds the history kept per bucket: two days, which
+	// is enough to ask whether today is worse than yesterday and short enough
+	// that the snapshot stays small. Only hours with traffic take a slot, so an
+	// idle bucket costs nothing and the worst case is bounded by this times
+	// observationsBucketMax.
+	observationsHourlyMax = 48
 )
 
 // observationsFlushInterval is the floor between disk writes. The snapshot is
@@ -94,10 +107,55 @@ const (
 //	                 The one actionable alarm here: this bucket cannot be
 //	                 rescued by the thing this plugin does.
 //	InjectedNormal   we injected and it signed a fresh good state regardless.
+//	InjectedOther    we injected and it signed something we do not recognise.
 type bucketObservation struct {
 	AuthID string `json:"auth_id"`
 	Model  string `json:"model"`
 
+	observationCounts
+
+	// Last* describe the most recent observation of any kind, silent ones
+	// included. So this answers "is traffic flowing through this bucket",
+	// which is a different question from "has the upstream told us anything",
+	// and the dashboard needs both to tell injection blindness apart from an
+	// account nobody is using.
+	LastKind  string `json:"last_kind"`
+	LastLen   int    `json:"last_len"`
+	LastWrote bool   `json:"last_wrote"`
+	LastAt    string `json:"last_at"`
+
+	// LastSigned* describe the most recent observation in which the upstream
+	// actually put a state on the wire -- whether or not we had injected into
+	// that request. This is what the dashboard ages.
+	//
+	// Not LastNatural*, and the difference is load bearing: a 292 signed on a
+	// request we injected into is still the upstream saying it serves this
+	// account normally. Ageing only the unprompted readings would file that
+	// evidence away as "blind", which is the opposite of what it shows.
+	LastSignedKind  string `json:"last_signed_kind,omitempty"`
+	LastSignedAt    string `json:"last_signed_at,omitempty"`
+	LastSignedWrote bool   `json:"last_signed_wrote,omitempty"`
+
+	// LastNatural* narrow that to the unprompted readings. Kept because the
+	// injected/natural split is the whole reason these counts mean anything,
+	// and an operator reading one row has to know which side it came from.
+	LastNaturalKind string `json:"last_natural_kind,omitempty"`
+	LastNaturalAt   string `json:"last_natural_at,omitempty"`
+
+	// Hourly is the history: one entry per hour that saw traffic, oldest
+	// first, capped at observationsHourlyMax. An idle bucket carries none.
+	Hourly []hourlyObservation `json:"hourly,omitempty"`
+}
+
+// observationCounts is the seven-way split of what happened, used for the
+// lifetime tally and for each hour of history alike.
+//
+// One type and one add() for both, because the alternative -- two switches
+// over the same cases -- fails by having a new kind wired into one and not the
+// other, and that shows up only as history that quietly disagrees with the
+// total. Embedded untagged, so these serialise flat: a caller reads
+// observed.natural_normal, not observed.counts.natural_normal.
+type observationCounts struct {
 	NaturalNormal  int64 `json:"natural_normal"`
 	NaturalLimited int64 `json:"natural_limited"`
 	NaturalOther   int64 `json:"natural_other"`
@@ -105,19 +163,97 @@ type bucketObservation struct {
 	InjectedSilent  int64 `json:"injected_silent"`
 	InjectedLimited int64 `json:"injected_limited"`
 	InjectedNormal  int64 `json:"injected_normal"`
+	InjectedOther   int64 `json:"injected_other"`
+}
 
-	// Last* describe the most recent observation of any kind.
-	LastKind  string `json:"last_kind"`
-	LastLen   int    `json:"last_len"`
-	LastWrote bool   `json:"last_wrote"`
-	LastAt    string `json:"last_at"`
+// add books one observation.
+//
+// The (silent, not-injected) pair never arrives -- recordObservation drops it
+// as noise before this is reached -- so the last case is (other, not
+// injected). Every injected case is named explicitly rather than falling
+// through, because "we injected and got back something unrecognised" filed
+// under NaturalOther would put our own traffic on the unprompted side of the
+// split and corrupt the only counts that can be read as a rate.
+func (c *observationCounts) add(wrote bool, kind string) {
+	switch {
+	case wrote && kind == observationSilent:
+		c.InjectedSilent++
+	case wrote && kind == observationLimited:
+		c.InjectedLimited++
+	case wrote && kind == observationNormal:
+		c.InjectedNormal++
+	case wrote:
+		c.InjectedOther++
+	case kind == observationNormal:
+		c.NaturalNormal++
+	case kind == observationLimited:
+		c.NaturalLimited++
+	default:
+		c.NaturalOther++
+	}
+}
 
-	// LastNatural* describe the most recent observation we did NOT prompt. This
-	// is the one the dashboard must age: a natural reading from an hour ago is
-	// not evidence about now, and presenting it as current state is exactly the
-	// blind spot this split exists to expose.
-	LastNaturalKind string `json:"last_natural_kind,omitempty"`
-	LastNaturalAt   string `json:"last_natural_at,omitempty"`
+// addAll sums another set in. TestObservationCountsAddAllCoversEveryField walks
+// the type to prove no counter is missed here.
+func (c *observationCounts) addAll(o observationCounts) {
+	c.NaturalNormal += o.NaturalNormal
+	c.NaturalLimited += o.NaturalLimited
+	c.NaturalOther += o.NaturalOther
+	c.InjectedSilent += o.InjectedSilent
+	c.InjectedLimited += o.InjectedLimited
+	c.InjectedNormal += o.InjectedNormal
+	c.InjectedOther += o.InjectedOther
+}
+
+// hourlyObservation is one hour of the same counts.
+//
+// The lifetime totals answer "how many since we started", which is the wrong
+// shape for the question an operator actually has -- is this worse than it was
+// yesterday. Only hours with traffic get an entry.
+type hourlyObservation struct {
+	Hour string `json:"hour"` // RFC3339, truncated to the hour, UTC
+	observationCounts
+}
+
+// hourSlot returns the counters for now's hour, appending a slot if this is
+// the first observation in it and dropping the oldest once the ring is full.
+//
+// The returned pointer aims into the slice, so it is only valid until the next
+// append. Every caller uses it immediately, under the lock.
+func (b *bucketObservation) hourSlot(now time.Time) *observationCounts {
+	hour := now.UTC().Truncate(time.Hour).Format(time.RFC3339)
+
+	// Observations arrive in time order, so the current hour is the last entry
+	// essentially always. The scan behind it covers a clock stepping backwards,
+	// which would otherwise open a second slot for an hour already present.
+	for i := len(b.Hourly) - 1; i >= 0; i-- {
+		if b.Hourly[i].Hour == hour {
+			return &b.Hourly[i].observationCounts
+		}
+	}
+
+	b.Hourly = append(b.Hourly, hourlyObservation{Hour: hour})
+	if len(b.Hourly) > observationsHourlyMax {
+		b.Hourly = b.Hourly[len(b.Hourly)-observationsHourlyMax:]
+	}
+	return &b.Hourly[len(b.Hourly)-1].observationCounts
+}
+
+// rollup sums the hours falling inside window. Hours are whole, so a 24h
+// window covers the last 24 hour-slots rather than exactly 24 hours -- close
+// enough for "is today worse than yesterday", and the alternative is keeping
+// per-request timestamps this deliberately does not keep.
+func (b bucketObservation) rollup(now time.Time, window time.Duration) observationCounts {
+	cutoff := now.UTC().Add(-window)
+	var out observationCounts
+	for _, h := range b.Hourly {
+		at, err := time.Parse(time.RFC3339, h.Hour)
+		if err != nil || at.Before(cutoff) {
+			continue
+		}
+		out.addAll(h.observationCounts)
+	}
+	return out
 }
 
 // observationSummary is a bucketObservation stripped of the key fields, for
@@ -125,37 +261,44 @@ type bucketObservation struct {
 // them there would put two sources of truth for the same key on one published
 // document.
 type observationSummary struct {
-	NaturalNormal  int64 `json:"natural_normal"`
-	NaturalLimited int64 `json:"natural_limited"`
-	NaturalOther   int64 `json:"natural_other"`
-
-	InjectedSilent  int64 `json:"injected_silent"`
-	InjectedLimited int64 `json:"injected_limited"`
-	InjectedNormal  int64 `json:"injected_normal"`
+	observationCounts
 
 	LastKind  string `json:"last_kind"`
 	LastLen   int    `json:"last_len"`
 	LastWrote bool   `json:"last_wrote"`
 	LastAt    string `json:"last_at"`
 
+	LastSignedKind  string `json:"last_signed_kind,omitempty"`
+	LastSignedAt    string `json:"last_signed_at,omitempty"`
+	LastSignedWrote bool   `json:"last_signed_wrote,omitempty"`
+
 	LastNaturalKind string `json:"last_natural_kind,omitempty"`
 	LastNaturalAt   string `json:"last_natural_at,omitempty"`
+
+	// Recent24h is the hourly history rolled into one figure per counter. The
+	// lifetime totals above can only answer "how many since we started", and
+	// an operator comparing today with yesterday cannot get there from a pair
+	// of numbers that only ever grow.
+	//
+	// The hours themselves are not published. They are on disk for whoever
+	// wants to chart them; putting 48 slots per bucket on a document the
+	// dashboard polls would grow it by more than the panel can use.
+	Recent24h observationCounts `json:"recent_24h"`
 }
 
-func (b bucketObservation) summary() observationSummary {
+func (b bucketObservation) summary(now time.Time) observationSummary {
 	return observationSummary{
-		NaturalNormal:   b.NaturalNormal,
-		NaturalLimited:  b.NaturalLimited,
-		NaturalOther:    b.NaturalOther,
-		InjectedSilent:  b.InjectedSilent,
-		InjectedLimited: b.InjectedLimited,
-		InjectedNormal:  b.InjectedNormal,
-		LastKind:        b.LastKind,
-		LastLen:         b.LastLen,
-		LastWrote:       b.LastWrote,
-		LastAt:          b.LastAt,
-		LastNaturalKind: b.LastNaturalKind,
-		LastNaturalAt:   b.LastNaturalAt,
+		observationCounts: b.observationCounts,
+		LastKind:          b.LastKind,
+		LastLen:           b.LastLen,
+		LastWrote:         b.LastWrote,
+		LastAt:            b.LastAt,
+		LastSignedKind:    b.LastSignedKind,
+		LastSignedAt:      b.LastSignedAt,
+		LastSignedWrote:   b.LastSignedWrote,
+		LastNaturalKind:   b.LastNaturalKind,
+		LastNaturalAt:     b.LastNaturalAt,
+		Recent24h:         b.rollup(now, 24*time.Hour),
 	}
 }
 
@@ -253,28 +396,27 @@ func recordObservation(cfg pluginConfig, authID, model string, valueLen int, wro
 		observations.byKey[key] = cell
 	}
 
-	switch {
-	case wrote && kind == observationSilent:
-		cell.InjectedSilent++
-	case wrote && kind == observationLimited:
-		cell.InjectedLimited++
-	case wrote && kind == observationNormal:
-		cell.InjectedNormal++
-	case !wrote && kind == observationNormal:
-		cell.NaturalNormal++
-	case !wrote && kind == observationLimited:
-		cell.NaturalLimited++
-	default:
-		cell.NaturalOther++
-	}
+	cell.observationCounts.add(wrote, kind)
+	cell.hourSlot(now).add(wrote, kind)
 
 	cell.LastKind = kind
 	cell.LastLen = valueLen
 	cell.LastWrote = wrote
 	cell.LastAt = now.UTC().Format(time.RFC3339)
-	if !wrote && kind != observationSilent {
-		cell.LastNaturalKind = kind
-		cell.LastNaturalAt = cell.LastAt
+
+	// Anything that is not silence is the upstream telling us something, and it
+	// counts as current evidence whether or not we had injected into that
+	// request. Silence is the one reading that says nothing on its own -- under
+	// injection it means our template was taken, which is not a state anyone
+	// signed.
+	if kind != observationSilent {
+		cell.LastSignedKind = kind
+		cell.LastSignedAt = cell.LastAt
+		cell.LastSignedWrote = wrote
+		if !wrote {
+			cell.LastNaturalKind = kind
+			cell.LastNaturalAt = cell.LastAt
+		}
 	}
 
 	observations.recent = append(observations.recent, observationEvent{

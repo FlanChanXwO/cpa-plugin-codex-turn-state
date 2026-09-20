@@ -6,17 +6,23 @@
   // 观测样例：每一种服务态各来一格，否则新面板只能看到其中一两种。
   // ago(分钟) 生成一个过去的时间戳。
   function ago(min){return new Date(Date.now()-min*60000).toISOString();}
+  // 每一格对应 observedState 的一个分支，预览页因此一屏看全所有状态。
+  function r24(n,l,o){return {natural_normal:n,natural_limited:l,natural_other:o||0,injected_silent:0,injected_limited:0,injected_normal:0,injected_other:0};}
   var OBSERVED = {
     // 新鲜的自然观测，正常。
-    'codex-demo-a-pro.json|gpt-5.5':      {natural_normal:161,natural_limited:0,natural_other:0,injected_silent:340,injected_limited:0,injected_normal:2,last_kind:'normal',last_len:292,last_wrote:false,last_at:ago(2),last_natural_kind:'normal',last_natural_at:ago(2)},
+    'codex-demo-a-pro.json|gpt-5.5':      {natural_normal:161,natural_limited:0,natural_other:0,injected_silent:340,injected_limited:0,injected_normal:2,injected_other:0,last_kind:'normal',last_len:292,last_wrote:false,last_at:ago(2),last_natural_kind:'normal',last_natural_at:ago(2),last_signed_kind:'normal',last_signed_at:ago(2),last_signed_wrote:false,recent_24h:r24(58,0)},
     // 新鲜的自然观测，受限 —— 桶是空的，采不到。
-    'codex-demo-a-pro.json|gpt-5.6-terra':{natural_normal:24,natural_limited:1076,natural_other:0,injected_silent:0,injected_limited:0,injected_normal:0,last_kind:'limited',last_len:312,last_wrote:false,last_at:ago(0),last_natural_kind:'limited',last_natural_at:ago(0)},
+    'codex-demo-a-pro.json|gpt-5.6-terra':{natural_normal:24,natural_limited:1076,natural_other:0,injected_silent:0,injected_limited:0,injected_normal:0,injected_other:0,last_kind:'limited',last_len:312,last_wrote:false,last_at:ago(0),last_natural_kind:'limited',last_natural_at:ago(0),last_signed_kind:'limited',last_signed_at:ago(0),last_signed_wrote:false,recent_24h:r24(9,402)},
+    // 上游在一个被我们注入过的请求上仍然签了新的 292 —— 直接证据，不是盲区。
+    'codex-demo-a-pro.json|gpt-6-astra': {natural_normal:2,natural_limited:0,natural_other:0,injected_silent:71,injected_limited:0,injected_normal:19,injected_other:0,last_kind:'normal',last_len:292,last_wrote:true,last_at:ago(1),last_natural_kind:'normal',last_natural_at:ago(88),last_signed_kind:'normal',last_signed_at:ago(1),last_signed_wrote:true,recent_24h:r24(1,0)},
     // 报警：我们注入了有效模板，上游照样发受限态。
-    'codex-demo-b-pro.json|gpt-5.5':      {natural_normal:8,natural_limited:31,natural_other:0,injected_silent:12,injected_limited:97,injected_normal:0,last_kind:'limited',last_len:312,last_wrote:true,last_at:ago(0),last_natural_kind:'limited',last_natural_at:ago(9)},
+    'codex-demo-b-pro.json|gpt-5.5':      {natural_normal:8,natural_limited:31,natural_other:0,injected_silent:12,injected_limited:97,injected_normal:0,injected_other:0,last_kind:'limited',last_len:312,last_wrote:true,last_at:ago(0),last_natural_kind:'limited',last_natural_at:ago(9),last_signed_kind:'limited',last_signed_at:ago(0),last_signed_wrote:true,recent_24h:r24(2,28)},
+    // 未知格式：既不是 292 也不是 312。上游换了格式，或者配置对不上了。
+    'codex-demo-b-pro.json|gpt-5.6-terra':{natural_normal:0,natural_limited:4,natural_other:55,injected_silent:0,injected_limited:0,injected_normal:0,injected_other:3,last_kind:'other',last_len:340,last_wrote:false,last_at:ago(1),last_natural_kind:'other',last_natural_at:ago(1),last_signed_kind:'other',last_signed_at:ago(1),last_signed_wrote:false,recent_24h:r24(0,1,37)},
     // 盲区：桶里有模板，一直在注入，上游因此不签发。
-    'codex-demo-c-pro.json|gpt-5.5':      {natural_normal:12,natural_limited:0,natural_other:0,injected_silent:806,injected_limited:0,injected_normal:0,last_kind:'silent',last_len:0,last_wrote:true,last_at:ago(0),last_natural_kind:'normal',last_natural_at:ago(47)},
-    // 陈旧：桶空着，最后一次自然观测已经很久以前。
-    'codex-demo-c-pro.json|gpt-5.6-terra':{natural_normal:3,natural_limited:11,natural_other:0,injected_silent:0,injected_limited:0,injected_normal:0,last_kind:'limited',last_len:312,last_wrote:false,last_at:ago(38),last_natural_kind:'limited',last_natural_at:ago(38)}
+    'codex-demo-c-pro.json|gpt-5.5':      {natural_normal:12,natural_limited:0,natural_other:0,injected_silent:806,injected_limited:0,injected_normal:0,injected_other:0,last_kind:'silent',last_len:0,last_wrote:true,last_at:ago(0),last_natural_kind:'normal',last_natural_at:ago(47),last_signed_kind:'normal',last_signed_at:ago(47),last_signed_wrote:false,recent_24h:r24(4,0)},
+    // 无流量：桶是好的，只是没人往这打请求 —— 与服务态无关。
+    'codex-demo-c-pro.json|gpt-5.6-terra':{natural_normal:3,natural_limited:11,natural_other:0,injected_silent:0,injected_limited:0,injected_normal:0,injected_other:0,last_kind:'limited',last_len:312,last_wrote:false,last_at:ago(38),last_natural_kind:'limited',last_natural_at:ago(38),last_signed_kind:'limited',last_signed_at:ago(38),last_signed_wrote:false,recent_24h:r24(1,5)}
     // 其余格子刻意不给 observed：「没数据」必须和「正常」看得出区别。
   };
   function feed(){

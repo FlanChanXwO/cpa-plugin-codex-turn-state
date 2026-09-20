@@ -1543,14 +1543,44 @@ function fmtAgo(ms) {
   return Math.floor(s / 3600) + "小时" + (Math.floor((s % 3600) / 60) || "") + (Math.floor((s % 3600) / 60) ? "分钟" : "");
 }
 
+// obsKindName 把服务端那组封闭的 kind 串转成中文。other 单独成一类而不是并进
+// 「正常」：我们只认识 292 和 312 两个长度，上游哪天换了格式，每个响应都会变成
+// other，那时候把它显示成正常是这个面板能犯的最严重的错误 —— 全线降智，满屏绿灯。
+function obsKindName(kind) {
+  if (kind === "limited") { return "受限"; }
+  if (kind === "normal") { return "正常"; }
+  if (kind === "silent") { return "无状态"; }
+  return "未知格式";
+}
+
+// obs24h 把近 24 小时的自然观测拼成一行。终身计数只能回答「从某时起一共多少」，
+// 回答不了「今天是不是比昨天糟」，而后者才是看这一格的人真正想知道的。
+function obs24h(o) {
+  var r = o && o.recent_24h;
+  if (!r) { return ""; }
+  var n = (r.natural_normal || 0) + (r.natural_limited || 0) + (r.natural_other || 0);
+  if (!n) { return "\n近 24h 无自然观测。"; }
+  return "\n近 24h 自然观测：正常 " + (r.natural_normal || 0)
+       + " · 受限 " + (r.natural_limited || 0)
+       + (r.natural_other ? (" · 未知格式 " + r.natural_other) : "");
+}
+
 // observedState 把一格的观测化成「此刻该显示什么」。
 //
 // 它存在的全部理由是那个盲区：桶里有活模板的时候，每个请求都被注入、上游因此
 // 不再签发，这一侧什么都看不到 —— 最长一个 TTL。这段时间里沿用上一次「正常」
 // 就是拿一小时前的结论冒充现状，所以盲区必须自己占一个状态。
 //
-// 判定顺序是有意的：先报警，再看新鲜的自然观测，最后才退到盲区和陈旧读数。
-function observedState(b) {
+// 关键的一点：判新鲜度用的是 last_signed_*（上游签发过状态的最近一次，不论那
+// 次请求我们有没有注入），不是 last_natural_*。上游在一个被我们注入过的请求上
+// 仍然签了新的 292，这是「它正常服务这个账号」最直接的证据；只认自然观测就会
+// 把这份证据当成没有，让一个健康的桶在手握实证的时候显示盲区。
+//
+// dryRun 必须传进来。dry_run 下桶里有模板但我们从不注入，此时的沉默是上游自己
+// 的行为，不是我们造成的盲区 —— 而 dry_run 恰恰是运维用来「只看不碰」的模式。
+//
+// 判定顺序：无数据 → 无流量 → 新鲜读数（报警在其中）→ 盲区 → 陈旧。
+function observedState(b, dryRun) {
   var o = b && b.observed;
   if (!o || !o.last_at) {
     return { cls: "obs-none", label: "— 无观测",
@@ -1558,55 +1588,82 @@ function observedState(b) {
   }
 
   var now = Date.now();
-  var last = Date.parse(o.last_at);
-  var nat = o.last_natural_at ? Date.parse(o.last_natural_at) : NaN;
-  var natN = (o.natural_normal || 0) + (o.natural_limited || 0);
+  var last = Date.parse(o.last_at);                                     // 有没有流量
+  var signed = o.last_signed_at ? Date.parse(o.last_signed_at) : NaN;   // 上游说过什么
+  var natN = (o.natural_normal || 0) + (o.natural_limited || 0) + (o.natural_other || 0);
   var nSuffix = natN ? "  n=" + natN : "";
 
   if (isFinite(last) && now - last > OBS_UNKNOWN_MS) {
     return { cls: "obs-none", label: "— 未知",
-             title: "最近一次观测在 " + fmtAgo(now - last) + "前。这个桶近期没有流量。" };
+             title: "最近一次观测在 " + fmtAgo(now - last) + "前。这个桶近期没有流量。" + obs24h(o) };
   }
 
-  // 最重要的一条，先判。我们给了有效模板，上游仍然发回受限态 —— 说明这个桶
-  // 不是「缺模板」，是真的被限；补模板救不了它。
-  if (o.last_wrote && o.last_kind === "limited") {
-    return { cls: "obs-alarm", label: "▲ 受限 · 模板失效",
-             title: "我们注入了有效模板，上游仍然签发受限状态（312）。\n"
-                  + "疑似降智：该状态下输出质量通常下降。\n"
-                  + "这个桶补模板没有用 —— 受限的是账号在这个模型上的服务，不是我们手上的状态。\n"
-                  + "累计 " + (o.injected_limited || 0) + " 次。" };
-  }
+  var signedFresh = isFinite(signed) && (now - signed) <= OBS_STALE_MS;
+  if (signedFresh) {
+    var ageText = fmtAgo(now - signed) + "前";
+    var via = o.last_signed_wrote ? "在一个我们注入过的请求上" : "主动";
 
-  var natFresh = isFinite(nat) && (now - nat) <= OBS_STALE_MS;
-  if (natFresh) {
-    if (o.last_natural_kind === "limited") {
-      return { cls: "obs-bad", label: "● 受限 (312)" + nSuffix,
-               title: "上游主动签发的是受限状态（312 字符），" + fmtAgo(now - nat) + "前。\n"
+    // 最重要的一条。我们给了有效模板，上游仍然发回受限态 —— 说明这个桶不是
+    // 「缺模板」，是真的被限；补模板救不了它。
+    if (o.last_signed_kind === "limited" && o.last_signed_wrote) {
+      return { cls: "obs-alarm", label: "▲ 受限 · 模板失效",
+               title: "我们注入了有效模板，上游仍然签发受限状态（312），" + ageText + "。\n"
                     + "疑似降智：该状态下输出质量通常下降。\n"
-                    + "注：长度本身只证明服务态，这一层是运维判断。\n"
-                    + "自然观测累计：正常 " + (o.natural_normal || 0) + " · 受限 " + (o.natural_limited || 0) };
+                    + "这个桶补模板没有用 —— 受限的是账号在这个模型上的服务，不是我们手上的状态。\n"
+                    + "累计 " + (o.injected_limited || 0) + " 次。" + obs24h(o) };
     }
-    return { cls: "obs-ok", label: "● 正常 (292)" + nSuffix,
-             title: "上游主动签发的是正常状态（292 字符），" + fmtAgo(now - nat) + "前。\n"
-                  + "自然观测累计：正常 " + (o.natural_normal || 0) + " · 受限 " + (o.natural_limited || 0) };
+    if (o.last_signed_kind === "limited") {
+      return { cls: "obs-bad", label: "● 受限 (312)" + nSuffix,
+               title: "上游" + via + "签发的是受限状态（312 字符），" + ageText + "。\n"
+                    + "疑似降智：该状态下输出质量通常下降。\n"
+                    + "注：长度本身只证明服务态，这一层是运维判断。" + obs24h(o) };
+    }
+    if (o.last_signed_kind === "normal") {
+      return { cls: "obs-ok", label: "● 正常 (292)" + nSuffix,
+               title: "上游" + via + "签发的是正常状态（292 字符），" + ageText + "。" + obs24h(o) };
+    }
+    // 既不是 292 也不是 312。可能是上游改了格式，也可能是 template_length /
+    // replace_length 配错了。两种都不能说成正常。
+    return { cls: "obs-bad", label: "? 未知格式 (" + (o.last_len || 0) + ")" + nSuffix,
+             title: "上游" + via + "签发了 " + (o.last_len || 0) + " 字符的状态，" + ageText + "，\n"
+                  + "既不是正常态（292）也不是受限态（312）。\n"
+                  + "要么上游换了格式，要么配置里的 template_length / replace_length 对不上了 ——\n"
+                  + "在弄清楚之前，这一格的正常与否无法判断。" + obs24h(o) };
   }
 
-  // 没有新鲜的自然观测。桶里有模板 = 我们在注入 = 上游没理由签发 = 看不见。
-  if (b.ready) {
-    var blindFor = isFinite(nat) ? fmtAgo(now - nat) : "开始以来";
+  // 上游最近没签发过任何状态。为什么，取决于流量还在不在、我们有没有在注入。
+  var trafficFresh = isFinite(last) && (now - last) <= OBS_STALE_MS;
+  var blindFor = isFinite(signed) ? fmtAgo(now - signed) : "开始以来";
+
+  if (b.ready && !dryRun && trafficFresh) {
     return { cls: "obs-blind", label: "◌ 注入中 · 盲区 " + blindFor,
              title: "桶里有活模板，每个请求都被注入，上游因此不再签发新状态 —— 这段时间看不到真实服务态。\n"
                   + "不是「正常」，是「不知道」。\n"
-                  + (isFinite(nat) ? ("上次自然观测：" + blindFor + "前（" + (o.last_natural_kind === "limited" ? "受限" : "正常") + "）\n") : "")
-                  + "注入后上游保持沉默 " + (o.injected_silent || 0) + " 次 —— 沉默即被接受。" };
+                  + (isFinite(signed) ? ("上次签发：" + blindFor + "前（" + obsKindName(o.last_signed_kind) + "）\n") : "")
+                  + "注入后上游未再签发 " + (o.injected_silent || 0) + " 次。\n"
+                  + "通常意味着模板被接受了，但这是推断 —— 沉默本身不是证据。" + obs24h(o) };
   }
 
-  // 桶空着，也没有新鲜的自然观测：只能报最后看到的，并说清它已经旧了。
-  var stale = o.last_natural_kind === "limited" ? "受限" : (o.last_natural_kind === "normal" ? "正常" : "—");
+  if (b.ready && dryRun && trafficFresh) {
+    return { cls: "obs-blind", label: "◌ 有模板 · 未注入 " + blindFor,
+             title: "dry_run 开着，桶里的模板没有被用出去，所以这段沉默是上游自己的行为，不是我们造成的盲区。\n"
+                  + "上游就是没有签发新状态。\n"
+                  + (isFinite(signed) ? ("上次签发：" + blindFor + "前（" + obsKindName(o.last_signed_kind) + "）") : "") + obs24h(o) };
+  }
+
+  if (!trafficFresh) {
+    var quiet = fmtAgo(now - last);
+    return { cls: "obs-blind", label: "· 无流量 " + quiet + nSuffix,
+             title: "这个桶 " + quiet + "没有请求经过，所以没有新读数 —— 和服务态好坏无关。\n"
+                  + (isFinite(signed) ? ("上次签发：" + fmtAgo(now - signed) + "前（" + obsKindName(o.last_signed_kind) + "）") : "从未观测到上游签发状态。")
+                  + obs24h(o) };
+  }
+
+  // 有流量、桶是空的、上游也不签发。只能报最后看到的，并说清它已经旧了。
+  var stale = isFinite(signed) ? obsKindName(o.last_signed_kind) : "—";
   return { cls: "obs-blind", label: "· " + stale + "（陈旧）" + nSuffix,
-           title: "最后一次自然观测是" + (isFinite(nat) ? (fmtAgo(now - nat) + "前") : "很久以前")
-                + "的「" + stale + "」，已经不能代表此刻。\n桶是空的，所以也不在注入盲区里。" };
+           title: "最后一次签发是" + (isFinite(signed) ? (fmtAgo(now - signed) + "前") : "很久以前")
+                + "的「" + stale + "」，已经不能代表此刻。\n桶是空的，所以也不在注入盲区里。" + obs24h(o) };
 }
 
 function renderMatrix(d) {
@@ -1708,7 +1765,7 @@ function renderMatrix(d) {
       // 服务态，独立于 TTL。桶还有二十分钟寿命、上游却已经在发受限态，是完全
       // 可能的 —— 那正是最该看见的一格，而只看 TTL 会把它显示成绿色。
       if (b) {
-        var obs = observedState(b);
+        var obs = observedState(b, !!d.dry_run);
         td.appendChild(el("span", { cls: "obs " + obs.cls, text: obs.label, attrs: { title: obs.title } }));
       }
       // 角标对缺桶的格子同样可用 —— 主按钮 disabled，它不受影响。

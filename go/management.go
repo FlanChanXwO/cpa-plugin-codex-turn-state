@@ -1142,7 +1142,7 @@ func handleStatus() pluginapi.ManagementResponse {
 	byKey := make(map[string]observationSummary, len(observed))
 	for _, cell := range observed {
 		key := bucketKey(cell.AuthID, cell.Model)
-		byKey[key] = cell.summary()
+		byKey[key] = cell.summary(now)
 		if seen[key] {
 			continue
 		}

@@ -65,19 +65,39 @@ var statusResponsePublicFields = []string{
 	// The observation tally. Counters, a closed set of kind strings
 	// (normal/limited/silent/other), lengths and timestamps -- nothing that can
 	// hold a credential. Reviewed field by field when they were added.
+	//
+	// bucketObservation.Hourly is deliberately NOT here: the per-hour history
+	// lives in the snapshot on disk and is rolled up into recent_24h for the
+	// page. Publishing 48 slots per bucket would grow a polled document for
+	// data the panel does not draw.
 	"buckets.observed",
 	"buckets.observed.injected_limited",
 	"buckets.observed.injected_normal",
+	"buckets.observed.injected_other",
 	"buckets.observed.injected_silent",
 	"buckets.observed.last_at",
 	"buckets.observed.last_kind",
 	"buckets.observed.last_len",
 	"buckets.observed.last_natural_at",
 	"buckets.observed.last_natural_kind",
+	// The most recent reading in which the upstream signed anything, injected
+	// or not. Same classes of value as last_natural_*: a timestamp, a kind from
+	// the closed set, and a bool.
+	"buckets.observed.last_signed_at",
+	"buckets.observed.last_signed_kind",
+	"buckets.observed.last_signed_wrote",
 	"buckets.observed.last_wrote",
 	"buckets.observed.natural_limited",
 	"buckets.observed.natural_normal",
 	"buckets.observed.natural_other",
+	"buckets.observed.recent_24h",
+	"buckets.observed.recent_24h.injected_limited",
+	"buckets.observed.recent_24h.injected_normal",
+	"buckets.observed.recent_24h.injected_other",
+	"buckets.observed.recent_24h.injected_silent",
+	"buckets.observed.recent_24h.natural_limited",
+	"buckets.observed.recent_24h.natural_normal",
+	"buckets.observed.recent_24h.natural_other",
 	"buckets.ready",
 	"buckets.seconds_left",
 	"config_errors",
@@ -217,7 +237,16 @@ type walkerProbeInner struct {
 	hidden string //nolint:unused // present so the walk is seen to skip it
 }
 
+// walkerProbeEmbedded is embedded untagged, the shape bucketObservation uses
+// for its counters. Unexported on purpose: encoding/json still promotes the
+// exported fields of an embedded unexported struct type, and that is the case
+// most likely to be got wrong.
+type walkerProbeEmbedded struct {
+	Promoted string `json:"promoted"`
+}
+
 type walkerProbeOuter struct {
+	walkerProbeEmbedded
 	Top      int                `json:"top"`
 	Nested   walkerProbeInner   `json:"nested"`
 	List     []walkerProbeInner `json:"list"`
@@ -237,6 +266,7 @@ func TestJSONFieldPathsDescends(t *testing.T) {
 		"nested.alpha",
 		"pointer", // a *struct is followed
 		"pointer.alpha",
+		"promoted", // embedded untagged: promoted to the parent, NOT nested
 		"top",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -246,6 +276,36 @@ func TestJSONFieldPathsDescends(t *testing.T) {
 		if strings.Contains(path, "Omit") || strings.Contains(path, "hidden") {
 			t.Errorf("walk emitted %q; json:\"-\" and unexported fields are never serialised", path)
 		}
+	}
+
+	// The list above is still only my reading of encoding/json's rules, and the
+	// promotion rule for an embedded unexported struct type is the kind of thing
+	// a person gets wrong from memory. Ask the marshaller instead of trusting
+	// the reading: at the top level the two must agree exactly.
+	raw, err := json.Marshal(walkerProbeOuter{})
+	if err != nil {
+		t.Fatalf("marshalling the probe: %v", err)
+	}
+	var emitted map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &emitted); err != nil {
+		t.Fatalf("unmarshalling the probe: %v", err)
+	}
+	var actual []string
+	for key := range emitted {
+		actual = append(actual, key)
+	}
+	var walked []string
+	for _, path := range got {
+		if !strings.Contains(path, ".") {
+			walked = append(walked, path)
+		}
+	}
+	sort.Strings(actual)
+	sort.Strings(walked)
+	if !reflect.DeepEqual(walked, actual) {
+		t.Errorf("the walk and encoding/json disagree about the top-level keys; every pin in this file "+
+			"is a claim about what ships, so the walk has to match the marshaller.\n walked: %v\nmarshalled: %v",
+			walked, actual)
 	}
 }
 
@@ -275,18 +335,39 @@ func collectJSONFields(t *testing.T, typ reflect.Type, prefix string, out *[]str
 
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
-		if field.Anonymous {
-			t.Fatalf("%s embeds %s; encoding/json inlines embedded fields and this walk does not model that", typ, field.Type)
-		}
-		if field.PkgPath != "" {
-			continue // unexported: never serialised
-		}
 
 		tag := field.Tag.Get("json")
 		if tag == "-" {
 			continue
 		}
 		name := strings.Split(tag, ",")[0]
+
+		if field.Anonymous && name == "" {
+			// encoding/json promotes an untagged embedded struct's exported
+			// fields onto the parent rather than nesting them -- including when
+			// the embedded type itself is unexported, which is why this runs
+			// ahead of the PkgPath check below. Modelling it is not optional:
+			// pinning "observed.counts.natural_normal" for a key that ships as
+			// "observed.natural_normal" would make every list in this file
+			// describe a document that does not exist, and the pins would then
+			// be green about the wrong surface.
+			//
+			// A tagged embed is a different thing -- encoding/json nests it
+			// under the tag name -- and falls through to the ordinary path.
+			embedded := derefType(field.Type)
+			if embedded.Kind() != reflect.Struct {
+				t.Fatalf("%s embeds the non-struct %s; encoding/json's rules there are subtle "+
+					"(an unexported one is dropped outright) and nothing in this plugin does it, "+
+					"so this walk refuses to guess", typ, field.Type)
+			}
+			rejectOpaque(t, embedded, typ.String()+"."+field.Name)
+			collectJSONFields(t, embedded, prefix, out)
+			continue
+		}
+
+		if field.PkgPath != "" {
+			continue // unexported: never serialised
+		}
 		if name == "" {
 			name = field.Name
 		}
