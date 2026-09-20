@@ -70,6 +70,28 @@ type mgmtBucket struct {
 	IssuedAt    string `json:"issued_at"`
 	ExpiresAt   string `json:"expires_at"`
 	SecondsLeft int64  `json:"seconds_left"`
+	// Observed is absent on a bucket nothing has been seen for, which is why
+	// this is a pointer: "no traffic" and "normal" must stay distinguishable.
+	Observed *mgmtObserved `json:"observed"`
+}
+
+type mgmtObserved struct {
+	NaturalNormal   int64  `json:"natural_normal"`
+	NaturalLimited  int64  `json:"natural_limited"`
+	InjectedSilent  int64  `json:"injected_silent"`
+	InjectedLimited int64  `json:"injected_limited"`
+	LastKind        string `json:"last_kind"`
+	LastWrote       bool   `json:"last_wrote"`
+	LastNaturalKind string `json:"last_natural_kind"`
+	LastNaturalAt   string `json:"last_natural_at"`
+}
+
+type mgmtObservationEvent struct {
+	AuthID string `json:"auth_id"`
+	Model  string `json:"model"`
+	Len    int    `json:"len"`
+	Wrote  bool   `json:"wrote"`
+	Kind   string `json:"kind"`
 }
 
 type mgmtCounters struct {
@@ -95,11 +117,13 @@ type mgmtStatus struct {
 	// host.auth.list and "store" when it had to be inferred from what the store
 	// already holds. Under "store" a never-probed account is invisible, so the
 	// distinction is what stops an empty matrix reading as "nothing to probe".
-	AccountsSource string       `json:"accounts_source"`
-	AccountsError  string       `json:"accounts_error"`
-	StoreError     string       `json:"store_error"`
-	Counters       mgmtCounters `json:"counters"`
-	ProbeAccounts  []string     `json:"probe_accounts"`
+	AccountsSource    string                 `json:"accounts_source"`
+	AccountsError     string                 `json:"accounts_error"`
+	StoreError        string                 `json:"store_error"`
+	Counters          mgmtCounters           `json:"counters"`
+	ObservationsSince string                 `json:"observations_since"`
+	ObservationFeed   []mgmtObservationEvent `json:"observation_feed"`
+	ProbeAccounts     []string               `json:"probe_accounts"`
 	// ProbeProxies is plaintext, and that is the contract now rather than an
 	// oversight -- see TestStatusShowsProbeProxiesInTheClear for why it changed
 	// and what still stays masked. ProbeProxyCount survived the change.

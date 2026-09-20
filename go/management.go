@@ -868,6 +868,11 @@ type statusBucket struct {
 	// audit which buckets rest on a deduction rather than on what CPA reported.
 	Attribution string `json:"attribution"`
 	SecondsLeft int64  `json:"seconds_left"`
+	// Observed is what the upstream actually returned for this bucket, split by
+	// whether we had injected a template. Absent until the bucket has been seen
+	// at least once -- a row with no observations is "no traffic", which is a
+	// different thing from "normal" and must not render as one.
+	Observed *observationSummary `json:"observed,omitempty"`
 }
 
 type statusResponse struct {
@@ -940,6 +945,20 @@ type statusResponse struct {
 	// here, which is the constraint on what the runner may put in Lines: progress
 	// and outcomes, never a key and never a template value.
 	ProbeRun probeRunState `json:"probe_run"`
+
+	// ObservationsSince is when the tally these counts come from started. A
+	// rate is meaningless without it: 3 observations and 4237 observations are
+	// not the same claim, and the page must be able to say which it is holding.
+	ObservationsSince string `json:"observations_since,omitempty"`
+	// ObservationFeed is the most recent responses, newest first. Every field
+	// is structured -- no free text, unlike probe_run.lines above -- because
+	// this document is anonymously readable and a free-text channel on it is a
+	// leak waiting to be written into.
+	//
+	// What it newly exposes: per-account request timestamps, so an activity
+	// pattern. On a loopback-bound panel behind an SSH tunnel that is
+	// acceptable; on anything reachable it would not be.
+	ObservationFeed []observationEvent `json:"observation_feed"`
 }
 
 // handleStatus reports configuration, bucket readiness and decision tallies.
@@ -1107,6 +1126,37 @@ func handleStatus() pluginapi.ManagementResponse {
 		enabled, known := enabledByAuth[rec.AuthID]
 		cell.Enabled = !known || enabled
 		out.Buckets = append(out.Buckets, cell)
+	}
+
+	// Observations drift the same way, and worse: a model that is served but is
+	// neither configured nor stored -- one the upstream throttles so hard that
+	// no template ever lands -- has no record on disk and no row above, so its
+	// throttling would be invisible on the page that exists to show throttling.
+	// Give it a row.
+	observed, feed, since := observationsSnapshot()
+	out.ObservationsSince = since
+	out.ObservationFeed = feed
+	if out.ObservationFeed == nil {
+		out.ObservationFeed = []observationEvent{}
+	}
+	byKey := make(map[string]observationSummary, len(observed))
+	for _, cell := range observed {
+		key := bucketKey(cell.AuthID, cell.Model)
+		byKey[key] = cell.summary()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		row := bucketStatus(onDisk, cell.AuthID, cell.Model, now, ttl, cfg.TemplateLength)
+		enabled, known := enabledByAuth[cell.AuthID]
+		row.Enabled = !known || enabled
+		out.Buckets = append(out.Buckets, row)
+	}
+	for i := range out.Buckets {
+		if summary, ok := byKey[bucketKey(out.Buckets[i].AuthID, out.Buckets[i].Model)]; ok {
+			copied := summary
+			out.Buckets[i].Observed = &copied
+		}
 	}
 
 	// Stable order, or the page's rows and columns reshuffle on every refresh.

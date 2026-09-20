@@ -120,6 +120,45 @@ type bucketObservation struct {
 	LastNaturalAt   string `json:"last_natural_at,omitempty"`
 }
 
+// observationSummary is a bucketObservation stripped of the key fields, for
+// hanging off a status row that already carries auth_id and model. Repeating
+// them there would put two sources of truth for the same key on one published
+// document.
+type observationSummary struct {
+	NaturalNormal  int64 `json:"natural_normal"`
+	NaturalLimited int64 `json:"natural_limited"`
+	NaturalOther   int64 `json:"natural_other"`
+
+	InjectedSilent  int64 `json:"injected_silent"`
+	InjectedLimited int64 `json:"injected_limited"`
+	InjectedNormal  int64 `json:"injected_normal"`
+
+	LastKind  string `json:"last_kind"`
+	LastLen   int    `json:"last_len"`
+	LastWrote bool   `json:"last_wrote"`
+	LastAt    string `json:"last_at"`
+
+	LastNaturalKind string `json:"last_natural_kind,omitempty"`
+	LastNaturalAt   string `json:"last_natural_at,omitempty"`
+}
+
+func (b bucketObservation) summary() observationSummary {
+	return observationSummary{
+		NaturalNormal:   b.NaturalNormal,
+		NaturalLimited:  b.NaturalLimited,
+		NaturalOther:    b.NaturalOther,
+		InjectedSilent:  b.InjectedSilent,
+		InjectedLimited: b.InjectedLimited,
+		InjectedNormal:  b.InjectedNormal,
+		LastKind:        b.LastKind,
+		LastLen:         b.LastLen,
+		LastWrote:       b.LastWrote,
+		LastAt:          b.LastAt,
+		LastNaturalKind: b.LastNaturalKind,
+		LastNaturalAt:   b.LastNaturalAt,
+	}
+}
+
 // observationEvent is one row of the live feed. Every field is structured --
 // no free text. The status document is anonymously readable and a free-text
 // channel on it is a leak waiting to be written; see probe_run.lines for the

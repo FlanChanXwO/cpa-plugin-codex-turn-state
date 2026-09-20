@@ -305,3 +305,97 @@ func TestDryRunDecisionIsNotCountedAsAnInjection(t *testing.T) {
 		t.Errorf("natural=%d injected=%d, want 1 and 0", cell.NaturalLimited, cell.InjectedLimited)
 	}
 }
+
+// --- the status document ---------------------------------------------------
+
+// The tally has to reach the page, attached to the row it belongs to.
+func TestStatusCarriesObservationsOnTheBucketRow(t *testing.T) {
+	dir := t.TempDir()
+	mustConfigure(t, probeRoleConfig(dir))
+	cfg := resetObservations(t, "")
+
+	recordObservation(cfg, "codex-alpha.json", "gpt-5.5", 292, false)
+	recordObservation(cfg, "codex-alpha.json", "gpt-5.5", 312, true)
+
+	status := mustManagementStatus(t)
+	bucket, found := mgmtBucketByKey(status, "codex-alpha.json", "gpt-5.5")
+	if !found {
+		t.Fatal("no row for the observed bucket")
+	}
+	if bucket.Observed == nil {
+		t.Fatal("the row carries no observations")
+	}
+	if bucket.Observed.NaturalNormal != 1 || bucket.Observed.InjectedLimited != 1 {
+		t.Errorf("observed = natural_normal %d, injected_limited %d; want 1 and 1",
+			bucket.Observed.NaturalNormal, bucket.Observed.InjectedLimited)
+	}
+	if bucket.Observed.LastNaturalKind != observationNormal {
+		t.Errorf("last_natural_kind = %q, want %q: the injected 312 must not overwrite it",
+			bucket.Observed.LastNaturalKind, observationNormal)
+	}
+	if status.ObservationsSince == "" {
+		t.Error("observations_since is empty; a count with no start is not a rate")
+	}
+	if len(status.ObservationFeed) != 2 {
+		t.Fatalf("feed holds %d events, want 2", len(status.ObservationFeed))
+	}
+	if !status.ObservationFeed[0].Wrote || status.ObservationFeed[0].Len != 312 {
+		t.Errorf("feed[0] = (len %d, wrote %v), want the most recent (312, true)",
+			status.ObservationFeed[0].Len, status.ObservationFeed[0].Wrote)
+	}
+}
+
+// A bucket nothing has been seen for must not carry an empty tally, which the
+// page would have to tell apart from a real zero.
+func TestStatusOmitsObservationsForUnseenBuckets(t *testing.T) {
+	dir := t.TempDir()
+	mustConfigure(t, probeRoleConfig(dir))
+	resetObservations(t, "")
+	// A stored bucket gives the matrix a row to render. Without one the loop
+	// below would pass over nothing.
+	seedMgmtBucket(t, dir, "codex-alpha.json", "gpt-5.5", wallClock().Add(-time.Minute))
+
+	status := mustManagementStatus(t)
+	if len(status.Buckets) == 0 {
+		t.Fatal("no rows at all; this assertion would pass vacuously")
+	}
+	for _, bucket := range status.Buckets {
+		if bucket.Observed != nil {
+			t.Errorf("row (%s, %s) carries a tally before anything was observed", bucket.AuthID, bucket.Model)
+		}
+	}
+	if status.ObservationFeed == nil {
+		t.Error("observation_feed is null rather than an empty array; the page has to special-case that")
+	}
+}
+
+// The case that would otherwise be invisible: a model the upstream throttles so
+// hard that no template ever lands has no store record, and if it is also not
+// in the configured list it gets no matrix row either. Its throttling would be
+// missing from the one page that exists to show throttling.
+func TestStatusGivesARowToAnObservedButUnconfiguredModel(t *testing.T) {
+	dir := t.TempDir()
+	mustConfigure(t, probeRoleConfig(dir)) // configures gpt-5.5 and gpt-5.6-sol
+	cfg := resetObservations(t, "")
+
+	recordObservation(cfg, "codex-alpha.json", "gpt-6-astra", 312, false)
+
+	status := mustManagementStatus(t)
+	bucket, found := mgmtBucketByKey(status, "codex-alpha.json", "gpt-6-astra")
+	if !found {
+		t.Fatal("no row for a model that was observed but is neither configured nor stored")
+	}
+	if bucket.Observed == nil || bucket.Observed.NaturalLimited != 1 {
+		t.Fatalf("the drift row carries no throttling count: %+v", bucket.Observed)
+	}
+	if bucket.Ready {
+		t.Error("the drift row reports ready, but nothing was ever stored for it")
+	}
+	// It is drift, not a target: counting it would report progress against a
+	// denominator the operator never chose.
+	for _, model := range status.Models {
+		if model == "gpt-6-astra" {
+			t.Fatal("gpt-6-astra leaked into the configured models list")
+		}
+	}
+}

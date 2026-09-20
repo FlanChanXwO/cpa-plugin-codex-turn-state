@@ -62,6 +62,22 @@ var statusResponsePublicFields = []string{
 	"buckets.issued_at",
 	"buckets.len",
 	"buckets.model",
+	// The observation tally. Counters, a closed set of kind strings
+	// (normal/limited/silent/other), lengths and timestamps -- nothing that can
+	// hold a credential. Reviewed field by field when they were added.
+	"buckets.observed",
+	"buckets.observed.injected_limited",
+	"buckets.observed.injected_normal",
+	"buckets.observed.injected_silent",
+	"buckets.observed.last_at",
+	"buckets.observed.last_kind",
+	"buckets.observed.last_len",
+	"buckets.observed.last_natural_at",
+	"buckets.observed.last_natural_kind",
+	"buckets.observed.last_wrote",
+	"buckets.observed.natural_limited",
+	"buckets.observed.natural_normal",
+	"buckets.observed.natural_other",
 	"buckets.ready",
 	"buckets.seconds_left",
 	"config_errors",
@@ -76,6 +92,20 @@ var statusResponsePublicFields = []string{
 	"generated_at",
 	"inject_mode",
 	"models",
+	// The live feed. auth_id here is the credential filename, which carries a
+	// customer email -- but it is already published on every buckets row, so
+	// this adds no new class of value. What it DOES newly publish is a
+	// per-account request timestamp, and therefore an activity pattern. That
+	// was a deliberate call for a loopback-bound panel; it would not be one for
+	// anything reachable.
+	"observation_feed",
+	"observation_feed.at",
+	"observation_feed.auth_id",
+	"observation_feed.kind",
+	"observation_feed.len",
+	"observation_feed.model",
+	"observation_feed.wrote",
+	"observations_since",
 	"probe_accounts",
 	"probe_proxies",
 	"probe_proxies_rotating",
