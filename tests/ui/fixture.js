@@ -3,12 +3,37 @@
   var clone = function (v) { return JSON.parse(JSON.stringify(v)); };
   var accounts = ['codex-demo-a-pro.json', 'codex-demo-b-pro.json', 'codex-demo-c-pro.json'];
   var models = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-astra'];
+  // 观测样例：每一种服务态各来一格，否则新面板只能看到其中一两种。
+  // ago(分钟) 生成一个过去的时间戳。
+  function ago(min){return new Date(Date.now()-min*60000).toISOString();}
+  var OBSERVED = {
+    // 新鲜的自然观测，正常。
+    'codex-demo-a-pro.json|gpt-5.5':      {natural_normal:161,natural_limited:0,natural_other:0,injected_silent:340,injected_limited:0,injected_normal:2,last_kind:'normal',last_len:292,last_wrote:false,last_at:ago(2),last_natural_kind:'normal',last_natural_at:ago(2)},
+    // 新鲜的自然观测，受限 —— 桶是空的，采不到。
+    'codex-demo-a-pro.json|gpt-5.6-terra':{natural_normal:24,natural_limited:1076,natural_other:0,injected_silent:0,injected_limited:0,injected_normal:0,last_kind:'limited',last_len:312,last_wrote:false,last_at:ago(0),last_natural_kind:'limited',last_natural_at:ago(0)},
+    // 报警：我们注入了有效模板，上游照样发受限态。
+    'codex-demo-b-pro.json|gpt-5.5':      {natural_normal:8,natural_limited:31,natural_other:0,injected_silent:12,injected_limited:97,injected_normal:0,last_kind:'limited',last_len:312,last_wrote:true,last_at:ago(0),last_natural_kind:'limited',last_natural_at:ago(9)},
+    // 盲区：桶里有模板，一直在注入，上游因此不签发。
+    'codex-demo-c-pro.json|gpt-5.5':      {natural_normal:12,natural_limited:0,natural_other:0,injected_silent:806,injected_limited:0,injected_normal:0,last_kind:'silent',last_len:0,last_wrote:true,last_at:ago(0),last_natural_kind:'normal',last_natural_at:ago(47)},
+    // 陈旧：桶空着，最后一次自然观测已经很久以前。
+    'codex-demo-c-pro.json|gpt-5.6-terra':{natural_normal:3,natural_limited:11,natural_other:0,injected_silent:0,injected_limited:0,injected_normal:0,last_kind:'limited',last_len:312,last_wrote:false,last_at:ago(38),last_natural_kind:'limited',last_natural_at:ago(38)}
+    // 其余格子刻意不给 observed：「没数据」必须和「正常」看得出区别。
+  };
+  function feed(){
+    return [
+      {at:ago(0),auth_id:accounts[1],model:'gpt-5.5',       len:312,wrote:true, kind:'limited'},
+      {at:ago(0),auth_id:accounts[0],model:'gpt-5.6-terra', len:312,wrote:false,kind:'limited'},
+      {at:ago(1),auth_id:accounts[2],model:'gpt-5.5',       len:0,  wrote:true, kind:'silent'},
+      {at:ago(2),auth_id:accounts[0],model:'gpt-5.5',       len:292,wrote:false,kind:'normal'},
+      {at:ago(4),auth_id:accounts[1],model:'gpt-6-astra',   len:312,wrote:false,kind:'limited'}
+    ];
+  }
   function initial() {
     var buckets = [];
     [[52,43,0,38],[49,0,7,0],[54,46,0,51]].forEach(function(row,i){
-      row.forEach(function(min,j){buckets.push({auth_id:accounts[i],model:models[j],ready:min>0,len:min?292:0,seconds_left:min*60,issued_at:new Date(Date.now()-(60-min)*60000).toISOString(),expires_at:new Date(Date.now()+min*60000).toISOString(),attribution:'observed'});});
+      row.forEach(function(min,j){var b={auth_id:accounts[i],model:models[j],ready:min>0,len:min?292:0,seconds_left:min*60,issued_at:new Date(Date.now()-(60-min)*60000).toISOString(),expires_at:new Date(Date.now()+min*60000).toISOString(),attribution:'observed'};var o=OBSERVED[accounts[i]+'|'+models[j]];if(o){b.observed=clone(o);}buckets.push(b);});
     });
-    return {role:'business',dry_run:false,inject_mode:'always',ttl_seconds:3600,template_length:292,replace_length:312,store_dir:'/data/turn-state-store',models:models.slice(),probe_accounts:accounts.slice(),buckets:buckets,targets_total:12,targets_ready:8,accounts_source:'host',counters:{harvest:24,substitute:108,pass:1614,skip:0},counters_since:new Date(Date.now()-3600000).toISOString(),probe_proxy_count:2,probe_proxies:['socks5h://user:example@static-01.example:1080','http://user:example@static-02.example:8080'],probe_proxy_rotating_count:4,probe_proxies_rotating:[1,2,3,4].map(function(i){return 'http://user:example@rotating-0'+i+'.example:8080';}),config_errors:[],probe_run:{running:true,total:12,done:12,started_at:new Date(Date.now()-120000).toISOString(),current:'renewal active',lines:['14:30:48 initial fill done; renewal active','14:31:06 demo-c gpt-6-astra: harvested len=292, fresh template stored','14:32:08 nothing due; next check in 1m0s']}};
+    return {role:'business',dry_run:false,inject_mode:'always',ttl_seconds:3600,template_length:292,replace_length:312,store_dir:'/data/turn-state-store',models:models.slice(),probe_accounts:accounts.slice(),buckets:buckets,targets_total:12,targets_ready:8,accounts_source:'host',counters:{harvest:24,substitute:108,pass:1614,skip:0},counters_since:new Date(Date.now()-3600000).toISOString(),probe_proxy_count:2,probe_proxies:['socks5h://user:example@static-01.example:1080','http://user:example@static-02.example:8080'],probe_proxy_rotating_count:4,probe_proxies_rotating:[1,2,3,4].map(function(i){return 'http://user:example@rotating-0'+i+'.example:8080';}),config_errors:[],observations_since:new Date(Date.now()-3*86400000).toISOString(),observation_feed:feed(),probe_run:{running:true,total:12,done:12,started_at:new Date(Date.now()-120000).toISOString(),current:'renewal active',lines:['14:30:48 initial fill done; renewal active','14:31:06 demo-c gpt-6-astra: harvested len=292, fresh template stored','14:32:08 nothing due; next check in 1m0s']}};
   }
   window.__mock = {status:initial(),requests:[],failNext:null,reset:function(){this.status=initial();this.requests=[];this.failNext=null;}};
   window.fetch = function (input, options) {

@@ -187,6 +187,39 @@ td.cell button:disabled:hover { outline: 0; }
    隐藏 —— 「多出来的桶」正是配置漂移的信号，藏了就再也没人发现。 */
 td.acct.outscope, th.model.outscope, em.outscope { font-style: italic; color: var(--faint); }
 
+/* ---------- 服务态观测 ---------- */
+/* 每格底下一条细带，回答的问题和上面的 TTL 不一样：TTL 说「我们手上的模板还
+   能用多久」，这条说「上游最近一次到底给了什么」。两个都正常才是真的正常。 */
+.obs { display: block; margin-top: 3px; font-size: 10.5px; line-height: 1.25;
+       font-family: ui-monospace, Menlo, Consolas, monospace; }
+.obs-ok    { color: var(--ok); }
+.obs-bad   { color: var(--bad); }
+.obs-alarm { color: var(--bad); font-weight: 700; }
+.obs-blind { color: var(--faint); }
+.obs-none  { color: var(--faint); opacity: .55; }
+.obs-n     { color: var(--muted); }
+
+/* 流水。定高滚动，理由同 #probeLines：一天几千条，让它把页面抻长就没法看了。 */
+#obsFeed:empty { display: none; }
+#obsFeed {
+  margin-top: 10px; max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.obsrow {
+  display: grid; grid-template-columns: 64px minmax(0, 1fr) 118px 96px 62px;
+  gap: 8px; align-items: baseline; padding: 3px 9px;
+  font-size: 11.5px; font-family: ui-monospace, Menlo, Consolas, monospace;
+  border-bottom: 1px solid var(--border);
+}
+.obsrow:last-child { border-bottom: 0; }
+.obsrow .t { color: var(--faint); }
+.obsrow .who, .obsrow .mdl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.obsrow .tag { color: var(--faint); }
+.obsrow.is-ok .verdict { color: var(--ok); }
+.obsrow.is-bad .verdict { color: var(--bad); }
+.obsrow.is-alarm { background: var(--bad-bg); }
+.obsrow.is-alarm .verdict { color: var(--bad); font-weight: 700; }
+
 /* ---------- 探测范围编辑器 ---------- */
 .lead { font-size: 12.5px; color: var(--muted); margin: 0 0 11px; }
 .scopegrid { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
@@ -1079,6 +1112,7 @@ button.btn.danger {
 <span>点格子可清空该桶</span>
 </div></div>
 <div id="counterSection"><div class="counters" id="counters"></div><div class="since" id="since"></div></div>
+<div class="panel-card" id="observeCard"><div class="panel-head"><div class="panel-title"><h2>服务态流水</h2><span class="title-rule"></span></div><span class="hint" id="obsSince"></span></div><p class="subtitle">上游每次签发的状态。<b>未注入</b>的是自然观测，能说明上游此刻怎么对待这个账号；<b>已注入</b>的不能 —— 那时上游多半不再签发，沉默即被接受。</p><div id="obsFeed"></div><div class="hint" id="obsEmpty"></div></div>
 <div class="panel-card" id="activityCard"><div class="panel-head"><div class="panel-title"><h2>探测活动</h2><span class="title-rule"></span></div><span class="hint">保留原始探测日志</span></div><span class="hint" id="probeProgress"></span><div id="probeLines"></div></div>
 <details class="help-details"><summary>探测与业务处理说明</summary><p>主动探测直接请求上游，不修改 CPA 账号启用状态或代理配置，可与业务并行。首次采集后进入续期检查。探测会消耗账号额度；停止探测会停止主动续期，不影响已有模板的使用。</p></details>
 </section>
@@ -1222,6 +1256,15 @@ function fmtTime(iso) {
   var d = new Date(iso);
   if (isNaN(d.getTime())) { return String(iso); }
   return d.toLocaleString();
+}
+
+// 流水一行只有 64px 放时间，而且同一屏的行都是最近几分钟的 —— 日期是噪音。
+function fmtClock(iso) {
+  if (!iso) { return "—"; }
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) { return "—"; }
+  function two(n) { return (n < 10 ? "0" : "") + n; }
+  return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
 }
 
 function fmtAgo(d) {
@@ -1484,6 +1527,88 @@ function uniqKeep(list) {
   return out;
 }
 
+/* ---------------------------- 服务态 ---------------------------- */
+
+// 超过这么久没有任何观测 —— 这个桶最近没有流量，说不上正常也说不上受限。
+var OBS_UNKNOWN_MS = 2 * 3600 * 1000;
+// 自然观测超过这么久就不能再当现状用。上游签发的状态有效期是一小时量级，
+// 十五分钟前的那次「正常」不足以说明此刻。
+var OBS_STALE_MS = 15 * 60 * 1000;
+
+function fmtAgo(ms) {
+  if (!isFinite(ms) || ms < 0) { return "—"; }
+  var s = Math.floor(ms / 1000);
+  if (s < 60) { return s + "秒"; }
+  if (s < 3600) { return Math.floor(s / 60) + "分钟"; }
+  return Math.floor(s / 3600) + "小时" + (Math.floor((s % 3600) / 60) || "") + (Math.floor((s % 3600) / 60) ? "分钟" : "");
+}
+
+// observedState 把一格的观测化成「此刻该显示什么」。
+//
+// 它存在的全部理由是那个盲区：桶里有活模板的时候，每个请求都被注入、上游因此
+// 不再签发，这一侧什么都看不到 —— 最长一个 TTL。这段时间里沿用上一次「正常」
+// 就是拿一小时前的结论冒充现状，所以盲区必须自己占一个状态。
+//
+// 判定顺序是有意的：先报警，再看新鲜的自然观测，最后才退到盲区和陈旧读数。
+function observedState(b) {
+  var o = b && b.observed;
+  if (!o || !o.last_at) {
+    return { cls: "obs-none", label: "— 无观测",
+             title: "这个桶还没有任何响应被观测到。不是「正常」，是「没数据」。" };
+  }
+
+  var now = Date.now();
+  var last = Date.parse(o.last_at);
+  var nat = o.last_natural_at ? Date.parse(o.last_natural_at) : NaN;
+  var natN = (o.natural_normal || 0) + (o.natural_limited || 0);
+  var nSuffix = natN ? "  n=" + natN : "";
+
+  if (isFinite(last) && now - last > OBS_UNKNOWN_MS) {
+    return { cls: "obs-none", label: "— 未知",
+             title: "最近一次观测在 " + fmtAgo(now - last) + "前。这个桶近期没有流量。" };
+  }
+
+  // 最重要的一条，先判。我们给了有效模板，上游仍然发回受限态 —— 说明这个桶
+  // 不是「缺模板」，是真的被限；补模板救不了它。
+  if (o.last_wrote && o.last_kind === "limited") {
+    return { cls: "obs-alarm", label: "▲ 受限 · 模板失效",
+             title: "我们注入了有效模板，上游仍然签发受限状态（312）。\n"
+                  + "疑似降智：该状态下输出质量通常下降。\n"
+                  + "这个桶补模板没有用 —— 受限的是账号在这个模型上的服务，不是我们手上的状态。\n"
+                  + "累计 " + (o.injected_limited || 0) + " 次。" };
+  }
+
+  var natFresh = isFinite(nat) && (now - nat) <= OBS_STALE_MS;
+  if (natFresh) {
+    if (o.last_natural_kind === "limited") {
+      return { cls: "obs-bad", label: "● 受限 (312)" + nSuffix,
+               title: "上游主动签发的是受限状态（312 字符），" + fmtAgo(now - nat) + "前。\n"
+                    + "疑似降智：该状态下输出质量通常下降。\n"
+                    + "注：长度本身只证明服务态，这一层是运维判断。\n"
+                    + "自然观测累计：正常 " + (o.natural_normal || 0) + " · 受限 " + (o.natural_limited || 0) };
+    }
+    return { cls: "obs-ok", label: "● 正常 (292)" + nSuffix,
+             title: "上游主动签发的是正常状态（292 字符），" + fmtAgo(now - nat) + "前。\n"
+                  + "自然观测累计：正常 " + (o.natural_normal || 0) + " · 受限 " + (o.natural_limited || 0) };
+  }
+
+  // 没有新鲜的自然观测。桶里有模板 = 我们在注入 = 上游没理由签发 = 看不见。
+  if (b.ready) {
+    var blindFor = isFinite(nat) ? fmtAgo(now - nat) : "开始以来";
+    return { cls: "obs-blind", label: "◌ 注入中 · 盲区 " + blindFor,
+             title: "桶里有活模板，每个请求都被注入，上游因此不再签发新状态 —— 这段时间看不到真实服务态。\n"
+                  + "不是「正常」，是「不知道」。\n"
+                  + (isFinite(nat) ? ("上次自然观测：" + blindFor + "前（" + (o.last_natural_kind === "limited" ? "受限" : "正常") + "）\n") : "")
+                  + "注入后上游保持沉默 " + (o.injected_silent || 0) + " 次 —— 沉默即被接受。" };
+  }
+
+  // 桶空着，也没有新鲜的自然观测：只能报最后看到的，并说清它已经旧了。
+  var stale = o.last_natural_kind === "limited" ? "受限" : (o.last_natural_kind === "normal" ? "正常" : "—");
+  return { cls: "obs-blind", label: "· " + stale + "（陈旧）" + nSuffix,
+           title: "最后一次自然观测是" + (isFinite(nat) ? (fmtAgo(now - nat) + "前") : "很久以前")
+                + "的「" + stale + "」，已经不能代表此刻。\n桶是空的，所以也不在注入盲区里。" };
+}
+
 function renderMatrix(d) {
   var buckets = d.buckets || [];
 
@@ -1580,6 +1705,12 @@ function renderMatrix(d) {
       }
       if (!isReady) { btn.disabled = true; }
       td.appendChild(btn);
+      // 服务态，独立于 TTL。桶还有二十分钟寿命、上游却已经在发受限态，是完全
+      // 可能的 —— 那正是最该看见的一格，而只看 TTL 会把它显示成绿色。
+      if (b) {
+        var obs = observedState(b);
+        td.appendChild(el("span", { cls: "obs " + obs.cls, text: obs.label, attrs: { title: obs.title } }));
+      }
       // 角标对缺桶的格子同样可用 —— 主按钮 disabled，它不受影响。
       td.appendChild(el("button", {
         cls: "cellprobe", text: "自检",
@@ -1632,6 +1763,58 @@ function renderMatrix(d) {
       s.appendChild(el("span", { text: " 个范围外的桶（其中 " + outsideReady + " 个仍就绪），不计入上面的分数" }));
     }
   }
+}
+
+// 流水。一行一次上游响应，最新在上。
+//
+// 「已注入 / 未注入」这一列不是装饰：只有未注入的行才是自然观测。把两者混在
+// 一起算比率，得到的是插件自己造出来的采样分布，不是上游的降级率。
+function renderObservationFeed(d) {
+  var feed = Array.isArray(d.observation_feed) ? d.observation_feed : [];
+  var box = $("obsFeed");
+  clear(box);
+
+  var since = $("obsSince");
+  since.textContent = d.observations_since
+    ? ("统计自 " + fmtTime(d.observations_since) + "　共 " + feed.length + " 条（上限 100）")
+    : "";
+
+  var empty = $("obsEmpty");
+  clear(empty);
+  if (!feed.length) {
+    empty.textContent = hasField(d, "observation_feed")
+      ? "还没有观测到任何响应。插件只在上游签发状态、或我们注入过模板时才记一笔 —— 普通流量大多两样都不占。"
+      : "当前 .so 不报 observation_feed，先更新插件。";
+    return;
+  }
+
+  feed.forEach(function (e) {
+    if (!e) { return; }
+    var limited = e.kind === "limited";
+    var alarm = limited && e.wrote;
+    var cls = "obsrow" + (alarm ? " is-alarm" : (limited ? " is-bad" : (e.kind === "normal" ? " is-ok" : "")));
+    var row = el("div", { cls: cls });
+    row.appendChild(el("span", { cls: "t", text: fmtClock(e.at) }));
+    row.appendChild(el("span", { cls: "who", text: e.auth_id || "—", attrs: { title: e.auth_id || "" } }));
+    row.appendChild(el("span", { cls: "mdl", text: e.model || "—", attrs: { title: e.model || "" } }));
+
+    var verdict = "—";
+    if (e.kind === "normal") { verdict = "正常 (292)"; }
+    else if (limited) { verdict = "受限 (312)"; }
+    else if (e.kind === "silent") { verdict = "未签发"; }
+    else { verdict = "其他 (" + (e.len || 0) + ")"; }
+    row.appendChild(el("span", { cls: "verdict", text: verdict }));
+
+    row.appendChild(el("span", {
+      cls: "tag", text: e.wrote ? "已注入" : "未注入",
+      attrs: {
+        title: e.wrote
+          ? "这次请求带着我们注入的模板出去。上游此后签发的东西不算自然观测。"
+          : "这次请求没有被改写，上游签发的是它自己的判断 —— 这才是自然观测。"
+      }
+    }));
+    box.appendChild(row);
+  });
 }
 
 function renderCounters(d) {
@@ -2575,6 +2758,7 @@ function render() {
   renderBadges(d);
   renderScope(d);
   renderMatrix(d);
+  renderObservationFeed(d);
   renderCounters(d);
   renderProbeRun(d);
   renderSelftestAuths(d);
