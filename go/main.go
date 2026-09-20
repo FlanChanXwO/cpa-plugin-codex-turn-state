@@ -1307,13 +1307,25 @@ const (
 )
 
 // rememberRequestAuth records the credential the request hook saw.
+//
+// Called on every request, including the ones where no account was observed.
+// That case has to clear any entry already under this id rather than return:
+// if CPA retries a request under the same RequestID and the second pass
+// carries no selected_auth_id, leaving the first pass's entry in place would
+// file the retry's response against the FIRST account -- one customer's
+// throttling recorded on another's row. Dropping the entry loses the
+// observation instead, which is the right way to be wrong here.
 func rememberRequestAuth(requestID, authID string) {
-	if requestID == "" || authID == "" {
+	if requestID == "" {
 		return
 	}
 	now := time.Now()
 	pendingAuth.mu.Lock()
 	defer pendingAuth.mu.Unlock()
+	if authID == "" {
+		delete(pendingAuth.byID, requestID)
+		return
+	}
 	if len(pendingAuth.byID) >= pendingAuthMax {
 		for key, entry := range pendingAuth.byID {
 			if now.Sub(entry.seenAt) > pendingAuthTTL {
@@ -1321,6 +1333,10 @@ func rememberRequestAuth(requestID, authID string) {
 			}
 		}
 	}
+	// Whole-entry replacement, which resets wrote to false. Load bearing: the
+	// decision this id's response should be judged against is the one this
+	// pass is about to make, and carrying a previous pass's injection flag
+	// forward would mark a request we left alone as one we wrote to.
 	pendingAuth.byID[requestID] = pendingAuthEntry{authID: authID, seenAt: now}
 }
 
