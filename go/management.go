@@ -946,6 +946,15 @@ type statusResponse struct {
 	// and outcomes, never a key and never a template value.
 	ProbeRun probeRunState `json:"probe_run"`
 
+	// Cloud Mint Settings (Dashboard 可视化字段)
+	CloudMintEnabled    bool   `json:"cloud_mint_enabled"`
+	CloudRelayURL       string `json:"cloud_relay_url"`
+	CloudRelayProxy     string `json:"cloud_relay_proxy"`
+	CloudRelayTransport string `json:"cloud_relay_transport"`
+	CloudRelayGateway   string `json:"cloud_relay_gateway"`
+	CloudMaxAttempts    int    `json:"cloud_max_attempts"`
+	CloudTimeoutSeconds int    `json:"cloud_timeout_seconds"`
+
 	// ObservationsSince is when the tally these counts come from started. A
 	// rate is meaningless without it: 3 observations and 4237 observations are
 	// not the same claim, and the page must be able to say which it is holding.
@@ -1006,6 +1015,14 @@ func handleStatus() pluginapi.ManagementResponse {
 		// deadlock. Nothing above needs the two views to be consistent with each
 		// other.
 		ProbeRun: probeRunSnapshot(),
+
+		CloudMintEnabled:    cfg.CloudMintEnabled,
+		CloudRelayURL:       cfg.CloudRelayURL,
+		CloudRelayProxy:     cfg.CloudRelayProxy,
+		CloudRelayTransport: cfg.CloudRelayTransport,
+		CloudRelayGateway:   cfg.CloudRelayGateway,
+		CloudMaxAttempts:    cfg.CloudMaxAttempts,
+		CloudTimeoutSeconds: cfg.CloudTimeoutSeconds,
 	}
 	if out.Models == nil {
 		out.Models = []string{}
@@ -1281,10 +1298,10 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	}
 	for name := range requested {
 		switch name {
-		case "accounts", "models", "proxies", "rotating":
+		case "accounts", "models", "proxies", "rotating", "mint_settings":
 		default:
 			return managementError(http.StatusBadRequest,
-				"unknown field "+name+"; expected accounts, models, proxies or rotating")
+				"unknown field "+name+"; expected accounts, models, proxies, rotating or mint_settings")
 		}
 	}
 
@@ -1299,6 +1316,16 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 
 	accounts, models, proxies := cfg.ProbeAccounts, cfg.Models, cfg.ProbeProxies
 	rotating := cfg.ProbeProxiesRotating
+	cloudMintEnabled := cfg.CloudMintEnabled
+	cloudRelayURL := cfg.CloudRelayURL
+	cloudRelayProxy := cfg.CloudRelayProxy
+	cloudRelayTransport := cfg.CloudRelayTransport
+	cloudRelayGateway := cfg.CloudRelayGateway
+	cloudMaxAttempts := cfg.CloudMaxAttempts
+	cloudTimeoutSeconds := cfg.CloudTimeoutSeconds
+	templateLen := cfg.TemplateLength
+	ttlSec := cfg.TTLSeconds
+
 	if requested["accounts"] {
 		accounts = q["account"]
 	}
@@ -1311,15 +1338,65 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	if requested["rotating"] {
 		rotating = q["rotating_proxy"]
 	}
+	if requested["mint_settings"] {
+		if v := q.Get("cloud_mint_enabled"); v != "" {
+			cloudMintEnabled = v == "true" || v == "1"
+		}
+		if v := q.Get("cloud_relay_url"); v != "" {
+			cloudRelayURL = strings.TrimSpace(v)
+		}
+		if v := q.Get("cloud_relay_proxy"); v != "" {
+			cloudRelayProxy = strings.TrimSpace(v)
+		}
+		if v := q.Get("cloud_relay_transport"); v != "" {
+			cloudRelayTransport = strings.TrimSpace(v)
+		}
+		if v := q.Get("cloud_relay_gateway"); v != "" {
+			cloudRelayGateway = strings.TrimSpace(v)
+		}
+		if v := q.Get("cloud_max_attempts"); v != "" {
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+				cloudMaxAttempts = n
+			}
+		}
+		if v := q.Get("cloud_timeout_seconds"); v != "" {
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+				cloudTimeoutSeconds = n
+			}
+		}
+		if v := q.Get("template_length"); v != "" {
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+				templateLen = n
+			}
+		}
+		if v := q.Get("ttl_seconds"); v != "" {
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+				ttlSec = n
+			}
+		}
+	}
 
 	accounts, models, proxies, rotating, problems := normaliseProbeScope(accounts, models, proxies, rotating)
 
 	scope := probeScope{
-		Accounts:  accounts,
-		Models:    models,
-		Proxies:   proxies,
-		Rotating:  rotating,
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		Accounts:            accounts,
+		Models:              models,
+		Proxies:             proxies,
+		Rotating:            rotating,
+		CloudMintEnabled:    cloudMintEnabled,
+		CloudRelayURL:       cloudRelayURL,
+		CloudRelayProxy:     cloudRelayProxy,
+		CloudRelayTransport: cloudRelayTransport,
+		CloudRelayGateway:   cloudRelayGateway,
+		CloudMaxAttempts:    cloudMaxAttempts,
+		CloudTimeoutSeconds: cloudTimeoutSeconds,
+		TemplateLength:      templateLen,
+		TTLSeconds:          ttlSec,
+		UpdatedAt:           time.Now().UTC().Format(time.RFC3339),
 	}
 	if errWrite := writeProbeScope(cfg.StoreDir, scope); errWrite != nil {
 		return managementError(http.StatusInternalServerError,
@@ -1327,14 +1404,21 @@ func handleScopeSave(q url.Values) pluginapi.ManagementResponse {
 	}
 
 	// Applied in memory as well as on disk, so the change is live without
-	// waiting for the host's next reconfigure. Templates are deliberately left
-	// alone: scope says which buckets the next probe run covers, not whether a
-	// template already held is still genuine.
+	// waiting for the host's next reconfigure.
 	state.mu.Lock()
 	state.config.ProbeAccounts = accounts
 	state.config.Models = models
 	state.config.ProbeProxies = proxies
 	state.config.ProbeProxiesRotating = rotating
+	state.config.CloudMintEnabled = cloudMintEnabled
+	state.config.CloudRelayURL = cloudRelayURL
+	state.config.CloudRelayProxy = cloudRelayProxy
+	state.config.CloudRelayTransport = cloudRelayTransport
+	state.config.CloudRelayGateway = cloudRelayGateway
+	state.config.CloudMaxAttempts = cloudMaxAttempts
+	state.config.CloudTimeoutSeconds = cloudTimeoutSeconds
+	state.config.TemplateLength = templateLen
+	state.config.TTLSeconds = ttlSec
 	state.configErrors = problems
 	state.mu.Unlock()
 

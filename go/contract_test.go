@@ -62,6 +62,13 @@ var statusResponsePublicFields = []string{
 	"buckets.issued_at",
 	"buckets.len",
 	"buckets.model",
+	"cloud_max_attempts",
+	"cloud_mint_enabled",
+	"cloud_relay_gateway",
+	"cloud_relay_proxy",
+	"cloud_relay_transport",
+	"cloud_relay_url",
+	"cloud_timeout_seconds",
 	// The observation tally. Counters, a closed set of kind strings
 	// (normal/limited/silent/other), lengths and timestamps -- nothing that can
 	// hold a credential. Reviewed field by field when they were added.

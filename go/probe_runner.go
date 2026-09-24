@@ -563,7 +563,7 @@ func probeHarvestBucket(ctx context.Context, cfg pluginConfig, pool *probeClient
 		probeCooldownMark(exit, cred.name, model, now)
 		fired = true
 
-		status, value, errFire := probeFireUpstream(ctx, client, cred, model)
+		status, value, errFire := probeFireUpstream(ctx, client, cred, model, cfg)
 		if errFire != nil {
 			// A transport failure means this exit did not carry the request at all;
 			// the next one might.
@@ -631,7 +631,7 @@ func probeHarvestRotating(ctx context.Context, cfg pluginConfig, pool *probeClie
 		}
 		fired = true
 
-		status, value, errFire := probeFireUpstream(ctx, client, cred, model)
+		status, value, errFire := probeFireUpstream(ctx, client, cred, model, cfg)
 		if errFire != nil {
 			probeRunLog("%s %s: rotating exit %s failed at transport, trying next: %s", short, model, probeShowProxy(exit), probeRedact(errFire.Error()))
 			continue
@@ -1077,7 +1077,14 @@ func probeSleep(ctx context.Context, wait time.Duration) bool {
 // socket be reused before being dropped -- generating the completion would spend
 // quota this probe has no use for. A transport error is returned as an error so
 // the caller can fall through to the next exit; an HTTP status is not.
-func probeFireUpstream(ctx context.Context, client *http.Client, cred probeCredential, model string) (int, string, error) {
+// probeFireUpstream makes one call to the upstream (or cloud relay) as one account
+// and returns the HTTP status and the turn-state header.
+func probeFireUpstream(ctx context.Context, client *http.Client, cred probeCredential, model string, cfg pluginConfig) (int, string, error) {
+	targetURL := probeUpstreamURL
+	if cfg.CloudMintEnabled && strings.TrimSpace(cfg.CloudRelayURL) != "" {
+		targetURL = strings.TrimSpace(cfg.CloudRelayURL)
+	}
+
 	payload := map[string]any{
 		"model":  model,
 		"stream": true,
@@ -1099,9 +1106,14 @@ func probeFireUpstream(ctx context.Context, client *http.Client, cred probeCrede
 		return 0, "", errMarshal
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, probeFireTimeout)
+	timeout := probeFireTimeout
+	if cfg.CloudMintEnabled && cfg.CloudTimeoutSeconds > 0 {
+		timeout = time.Duration(cfg.CloudTimeoutSeconds) * time.Second
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	request, errNew := http.NewRequestWithContext(callCtx, http.MethodPost, probeUpstreamURL, bytes.NewReader(raw))
+	request, errNew := http.NewRequestWithContext(callCtx, http.MethodPost, targetURL, bytes.NewReader(raw))
 	if errNew != nil {
 		return 0, "", errNew
 	}
@@ -1114,6 +1126,17 @@ func probeFireUpstream(ctx context.Context, client *http.Client, cred probeCrede
 	request.Header.Set("Originator", "codex-tui")
 	request.Header.Set("Session-Id", probeUUID())
 	request.Header.Set("User-Agent", probeUserAgent)
+
+	if cfg.CloudMintEnabled {
+		if cfg.CloudRelayKey != "" {
+			request.Header.Set("X-Relay-Key", cfg.CloudRelayKey)
+		}
+		gateway := cfg.CloudRelayGateway
+		if gateway == "" {
+			gateway = "unified-88"
+		}
+		request.Header.Set("X-Relay-Mint", gateway)
+	}
 
 	response, errDo := client.Do(request)
 	if errDo != nil {

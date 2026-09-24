@@ -380,6 +380,16 @@ type pluginConfig struct {
 	// loopback listener because the plugin runs inside CPA: a probe talks to the
 	// process hosting it, not out across the network.
 	ProbeBaseURL string `yaml:"probe_base_url"`
+
+	// Cloud Mint fields (FC 云端打票网关扩展)
+	CloudMintEnabled    bool   `yaml:"cloud_mint_enabled"`
+	CloudRelayURL       string `yaml:"cloud_relay_url"`
+	CloudRelayProxy     string `yaml:"cloud_relay_proxy"`
+	CloudRelayKey       string `yaml:"cloud_relay_key"`
+	CloudRelayTransport string `yaml:"cloud_relay_transport"`
+	CloudRelayGateway   string `yaml:"cloud_relay_gateway"`
+	CloudMaxAttempts    int    `yaml:"cloud_max_attempts"`
+	CloudTimeoutSeconds int    `yaml:"cloud_timeout_seconds"`
 }
 
 // defaultProbeBaseURL is CPA's own loopback listener. It is the default rather
@@ -389,16 +399,21 @@ const defaultProbeBaseURL = "http://127.0.0.1:8317"
 
 func defaultConfig() pluginConfig {
 	return pluginConfig{
-		Role:           "",
-		StoreDir:       "",
-		TemplateLength: 292,
-		ReplaceLength:  312,
-		TTLSeconds:     3600,
-		HarvestInband:  false,
-		InjectMode:     "replace-only",
-		DryRun:         false,
-		LogDecisions:   true,
-		ProbeBaseURL:   defaultProbeBaseURL,
+		Role:                "",
+		StoreDir:            "",
+		TemplateLength:      292,
+		ReplaceLength:       312,
+		TTLSeconds:          3600,
+		HarvestInband:       false,
+		InjectMode:          "replace-only",
+		DryRun:              false,
+		LogDecisions:        true,
+		ProbeBaseURL:        defaultProbeBaseURL,
+		CloudMintEnabled:    false,
+		CloudRelayTransport: "websocket",
+		CloudRelayGateway:   "unified-88",
+		CloudMaxAttempts:    24,
+		CloudTimeoutSeconds: 75,
 	}
 }
 
@@ -840,6 +855,34 @@ func configure(raw []byte) error {
 		var savedProblems []string
 		cfg.ProbeAccounts, cfg.Models, cfg.ProbeProxies, cfg.ProbeProxiesRotating, savedProblems =
 			normaliseProbeScope(saved.Accounts, saved.Models, saved.Proxies, saved.Rotating)
+		if saved.CloudRelayURL != "" {
+			cfg.CloudRelayURL = saved.CloudRelayURL
+		}
+		if saved.CloudRelayProxy != "" {
+			cfg.CloudRelayProxy = saved.CloudRelayProxy
+		}
+		if saved.CloudRelayKey != "" {
+			cfg.CloudRelayKey = saved.CloudRelayKey
+		}
+		if saved.CloudRelayTransport != "" {
+			cfg.CloudRelayTransport = saved.CloudRelayTransport
+		}
+		if saved.CloudRelayGateway != "" {
+			cfg.CloudRelayGateway = saved.CloudRelayGateway
+		}
+		if saved.CloudMaxAttempts > 0 {
+			cfg.CloudMaxAttempts = saved.CloudMaxAttempts
+		}
+		if saved.CloudTimeoutSeconds > 0 {
+			cfg.CloudTimeoutSeconds = saved.CloudTimeoutSeconds
+		}
+		if saved.TemplateLength > 0 {
+			cfg.TemplateLength = saved.TemplateLength
+		}
+		if saved.TTLSeconds > 0 {
+			cfg.TTLSeconds = saved.TTLSeconds
+		}
+		cfg.CloudMintEnabled = saved.CloudMintEnabled
 		scopeProblems = append(scopeProblems, savedProblems...)
 		scopeSource = scopeFileName + " (saved " + saved.UpdatedAt + ")"
 	}
@@ -1689,13 +1732,21 @@ const scopeFileName = "probe-scope.json"
 // probe run covers and which exits it tries. None of it is read by the business
 // path.
 type probeScope struct {
-	Accounts []string `json:"probe_accounts"`
-	Models   []string `json:"models"`
-	Proxies  []string `json:"probe_proxies"`
-	// Absent in files written before the pools were split, which decodes to nil
-	// and is exactly right: everything saved back then was a static exit.
-	Rotating  []string `json:"probe_proxies_rotating,omitempty"`
-	UpdatedAt string   `json:"updated_at"`
+	Accounts            []string `json:"probe_accounts"`
+	Models              []string `json:"models"`
+	Proxies             []string `json:"probe_proxies"`
+	Rotating            []string `json:"probe_proxies_rotating,omitempty"`
+	CloudMintEnabled    bool     `json:"cloud_mint_enabled,omitempty"`
+	CloudRelayURL       string   `json:"cloud_relay_url,omitempty"`
+	CloudRelayProxy     string   `json:"cloud_relay_proxy,omitempty"`
+	CloudRelayKey       string   `json:"cloud_relay_key,omitempty"`
+	CloudRelayTransport string   `json:"cloud_relay_transport,omitempty"`
+	CloudRelayGateway   string   `json:"cloud_relay_gateway,omitempty"`
+	CloudMaxAttempts    int      `json:"cloud_max_attempts,omitempty"`
+	CloudTimeoutSeconds int      `json:"cloud_timeout_seconds,omitempty"`
+	TemplateLength      int      `json:"template_length,omitempty"`
+	TTLSeconds          int      `json:"ttl_seconds,omitempty"`
+	UpdatedAt           string   `json:"updated_at"`
 }
 
 // loadProbeScope reads the saved scope, or returns nil when none exists. A

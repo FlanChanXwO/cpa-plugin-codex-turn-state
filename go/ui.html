@@ -46,7 +46,7 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1" name="viewport"/>
 <meta content="noindex, nofollow" name="robots"/>
-<title>Codex Turn-State · 状态管理控制台</title>
+<title>云端打票 · CLOUD MINT · CPA NATIVE PLUGIN</title>
 <style>
 :root {
   --bg: #ffffff;
@@ -393,6 +393,43 @@ select {
 #modal h3 { margin: 0 0 10px; font-size: 15px; }
 #modal .lines p { margin: 0 0 8px; font-size: 13.5px; color: var(--fg); }
 #modal .lines p.em { color: var(--bad); font-weight: 600; }
+/* ---------- 云端打票双栏布局 & 样式 ---------- */
+.mint-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; margin-top: 14px; }
+@media (max-width: 900px) { .mint-layout { grid-template-columns: 1fr; } }
+.mint-banner {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 16px; margin-bottom: 16px;
+}
+.mint-banner h2 { font-size: 14px; color: var(--fg); margin: 0 0 4px; text-transform: none; letter-spacing: normal; }
+.mint-banner p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.mint-sidebar { position: sticky; top: 18px; }
+.mint-sidecard { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.mint-sidecard h3 { margin: 0 0 14px; font-size: 14px; font-weight: 650; display: flex; justify-content: space-between; align-items: center; }
+.mint-field { margin-bottom: 14px; }
+.mint-field label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
+.mint-field input[type="text"], .mint-field input[type="number"], .mint-field select {
+  width: 100%; padding: 7px 10px; font-size: 13px; font-family: inherit;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--raised); color: var(--fg);
+}
+.mint-field .hint { margin-top: 4px; font-size: 11.5px; color: var(--faint); line-height: 1.4; }
+.mint-toggle { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.mint-toggle-label { font-size: 13px; font-weight: 600; color: var(--fg); }
+.mint-switch { position: relative; display: inline-block; width: 38px; height: 22px; }
+.mint-switch input { opacity: 0; width: 0; height: 0; }
+.mint-slider {
+  position: absolute; cursor: pointer; inset: 0; background-color: var(--border);
+  transition: .2s; border-radius: 22px;
+}
+.mint-slider:before {
+  position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px;
+  background-color: white; transition: .2s; border-radius: 50%;
+}
+.mint-switch input:checked + .mint-slider { background-color: var(--ok); }
+.mint-switch input:checked + .mint-slider:before { transform: translateX(16px); }
+.mint-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mint-side-actions { display: flex; gap: 10px; margin-top: 18px; }
+.mint-side-actions button { flex: 1; }
+
 #modal .acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 [hidden] { display: none !important; }
 </style>
@@ -1087,24 +1124,45 @@ button.btn.danger {
 <body>
 <div class="wrap" id="app">
 <header class="dashboard-header">
-<div><div class="eyebrow">CPA / CODEX TURN-STATE</div><h1>状态管理控制台</h1><p class="subtitle">查看模板健康状态，管理探测范围与代理出口。</p></div>
-<div class="header-status"><span class="status-pill" id="headerRole">等待状态</span><div id="headerRefresh"><div class="freshness" id="freshness"></div><button class="btn" id="btnPause" type="button">暂停刷新</button></div></div>
+<div style="display:flex;align-items:center;gap:12px;">
+<div style="background:#2a2d34;border-radius:8px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;color:#fff;">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><circle cx="6" cy="6" r="2.5"/><circle cx="14" cy="6" r="2.5"/><circle cx="6" cy="14" r="2.5"/><circle cx="14" cy="14" r="2.5"/></svg>
+</div>
+<div><h1>云端打票</h1><div class="eyebrow" style="margin-top:2px;">CLOUD MINT · CPA NATIVE PLUGIN</div></div>
+</div>
+<div class="header-status">
+<span class="status-pill is-ok" id="headerRole">云端打票已启用</span>
+<button class="btn ghost" id="btnScrollMint" type="button">打票设置</button>
+<button class="btn ghost" id="btnPause" type="button">刷新状态</button>
+<div id="headerRefresh" style="display:none;"><div class="freshness" id="freshness"></div></div>
+</div>
 </header>
 <nav aria-label="控制台导航" class="dashboard-tabs" role="tablist">
-<button aria-controls="panel-overview" aria-selected="true" class="tab" data-panel="overview" id="tab-overview" role="tab" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M3 11h4V3H3zm0 6h4v-3H3zm7 0h7V9h-7zm0-11h7V3h-7z"></path></svg> <span>概览</span></button>
-<button aria-controls="panel-scope" aria-selected="false" class="tab" data-panel="scope" id="tab-scope" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M3 5h14M3 10h14M3 15h14M7 3v4m6 1v4m-5 1v4"></path></svg> <span>探测范围</span></button>
-<button aria-controls="panel-proxies" aria-selected="false" class="tab" data-panel="proxies" id="tab-proxies" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M7 2h6v5H7zM2 13h6v5H2zm10 0h6v5h-6zM10 7v3M5 13v-3h10v3"></path></svg> <span>代理池</span></button>
-<button aria-controls="panel-settings" aria-selected="false" class="tab" data-panel="settings" id="tab-settings" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><circle cx="10" cy="10" r="3"></circle><path d="m8 2 4 0 1 3 3 1 2 4-2 4-3 1-1 3H8l-1-3-3-1-2-4 2-4 3-1z"></path></svg> <span>运行设置</span></button>
+<button aria-controls="panel-overview" aria-selected="true" class="tab" data-panel="overview" id="tab-overview" role="tab" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M3 11h4V3H3zm0 6h4v-3H3zm7 0h7V9h-7zm0-11h7V3h-7z"></path></svg> <span>概览与打票</span></button>
+<button aria-controls="panel-scope" aria-selected="false" class="tab" data-panel="scope" id="tab-scope" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M3 5h14M3 10h14M3 15h14M7 3v4m6 1v4m-5 1v4"></path></svg> <span>账号与模型</span></button>
+<button aria-controls="panel-proxies" aria-selected="false" class="tab" data-panel="proxies" id="tab-proxies" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><path d="M7 2h6v5H7zM2 13h6v5H2zm10 0h6v5h-6zM10 7v3M5 13v-3h10v3"></path></svg> <span>出网代理池</span></button>
+<button aria-controls="panel-settings" aria-selected="false" class="tab" data-panel="settings" id="tab-settings" role="tab" tabindex="-1" type="button"><svg aria-hidden="true" viewbox="0 0 20 20"><circle cx="10" cy="10" r="3"></circle><path d="m8 2 4 0 1 3 3 1 2 4-2 4-3 1-1 3H8l-1-3-3-1-2-4 2-4 3-1z"></path></svg> <span>高级运行设置</span></button>
 </nav>
 <div id="globalNotices"><div id="notices"></div></div>
 <section aria-labelledby="tab-overview" id="panel-overview" role="tabpanel">
-<div class="overview-stats">
-<div class="overview-stat"><div class="stat-label">模板就绪</div><div class="stat-value" id="overviewReady">—</div><div class="stat-note" id="overviewScope">等待状态数据</div></div>
-<div class="overview-stat"><div class="stat-label">探测状态</div><div class="stat-value text" id="overviewProbe">等待状态</div><div class="stat-note" id="overviewProbeNote">—</div></div>
-<div class="overview-stat"><div class="stat-label">注入策略</div><div class="stat-value text" id="overviewMode">—</div><div class="stat-note" id="overviewModeNote">—</div></div>
-<div class="overview-stat"><div class="stat-label">探测出口</div><div class="stat-value" id="overviewExits">—</div><div class="stat-note" id="overviewExitNote">等待代理配置</div></div>
+
+<div class="mint-banner">
+  <h2>有限取票 + 路由复用 + 协议校验</h2>
+  <p>取票受总次数与总时限约束；复用云端缓存中仍有效的目标路由 Cookie；校验格式、有效期及上游模型声明。<br>
+  780 仅是预期格式长度，节点编号和模型名称不证明模型实际能力。缓存就绪不代表质量评测通过。</p>
 </div>
-<div class="panel-card" id="matrixCard"><div class="panel-head"><div class="panel-title"><h2>账号与模型模板</h2><span class="title-rule"></span></div><div class="row" id="probeActions"><button class="btn primary" id="btnProbeStart" type="button">开始探测</button><button class="btn danger" id="btnProbeCancel" type="button">停止探测</button></div></div><div class="summary" id="summary"></div><div class="tablewrap"><table id="matrix"></table></div><div class="legend">
+
+<div class="mint-layout">
+<div class="mint-main">
+
+<div class="overview-stats" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 16px;">
+<div class="overview-stat"><div class="stat-label">协议合格缓存票</div><div class="stat-value" id="overviewReady">0</div><div class="stat-note" id="overviewScope">账号 × 模型 × 协议隔离</div></div>
+<div class="overview-stat"><div class="stat-label">正在打票</div><div class="stat-value text" id="overviewProbe">0</div><div class="stat-note" id="overviewProbeNote">同账号串行 · 上限 4 个工作任务</div></div>
+<div class="overview-stat"><div class="stat-label">失败冷却</div><div class="stat-value text" id="overviewMode">0</div><div class="stat-note" id="overviewModeNote">插件侧冷却；FC 轮询进度见云日志</div></div>
+<div class="overview-stat"><div class="stat-label">脱敏日志</div><div class="stat-value" id="overviewExits">80</div><div class="stat-note" id="overviewExitNote">内存保留最近 80 条</div></div>
+</div>
+
+<div class="panel-card" id="matrixCard"><div class="panel-head"><div class="panel-title"><h2>票与任务</h2><span class="title-rule"></span></div><div class="row" id="probeActions"><button class="btn primary" id="btnProbeStart" type="button">开始取票</button><button class="btn danger" id="btnProbeCancel" type="button">停止打票</button></div></div><div class="summary" id="summary"></div><div class="tablewrap"><table id="matrix"></table></div><div class="legend">
 <span><i class="swatch st-ok"></i>就绪（显示剩余时长）</span>
 <span><i class="swatch st-warn"></i>剩余不足 10 分钟</span>
 <span><i class="swatch st-miss"></i>缺失或已过期</span>
@@ -1112,9 +1170,105 @@ button.btn.danger {
 <span>点格子可清空该桶</span>
 </div></div>
 <div id="counterSection"><div class="counters" id="counters"></div><div class="since" id="since"></div></div>
-<div class="panel-card" id="observeCard"><div class="panel-head"><div class="panel-title"><h2>服务态流水</h2><span class="title-rule"></span></div><span class="hint" id="obsSince"></span></div><p class="subtitle">上游每次签发的状态。<b>未注入</b>的是自然观测，能说明上游此刻怎么对待这个账号；<b>已注入</b>的不能 —— 那时上游多半不再签发，沉默即被接受。</p><div id="obsFeed"></div><div class="hint" id="obsEmpty"></div></div>
-<div class="panel-card" id="activityCard"><div class="panel-head"><div class="panel-title"><h2>探测活动</h2><span class="title-rule"></span></div><span class="hint">保留原始探测日志</span></div><span class="hint" id="probeProgress"></span><div id="probeLines"></div></div>
-<details class="help-details"><summary>探测与业务处理说明</summary><p>主动探测直接请求上游，不修改 CPA 账号启用状态或代理配置，可与业务并行。首次采集后进入续期检查。探测会消耗账号额度；停止探测会停止主动续期，不影响已有模板的使用。</p></details>
+<div class="panel-card" id="observeCard"><div class="panel-head"><div class="panel-title"><h2>请求日志</h2><span class="title-rule"></span></div><span class="hint" id="obsSince"></span></div><p class="subtitle">脱敏记录 · 本地时间。最近 80 条请求与取票记录。票指纹不是原文。未返回新票不等于已接受旧票，也不代表请求失败。faster-model 是缓冲后备声明，不是响应 model；tier 仅展示响应声明。WS 的 previous/response 只显示指纹；created 不等于 completed，续签 ID 不能跨连接当票复用。</p><div id="obsFeed"></div><div class="hint" id="obsEmpty"></div></div>
+<div class="panel-card" id="activityCard"><div class="panel-head"><div class="panel-title"><h2>打票活动与云端日志</h2><span class="title-rule"></span></div><span class="hint">保留原始探测日志</span></div><span class="hint" id="probeProgress"></span><div id="probeLines"></div></div>
+
+</div> <!-- .mint-main -->
+
+<div class="mint-sidebar" id="mintSidebar">
+  <div class="mint-sidecard">
+    <h3>打票设置 <span class="status-pill is-ok" style="font-size:11px;font-weight:normal;">运行参数已同步</span></h3>
+    
+    <div class="mint-toggle">
+      <div>
+        <div class="mint-toggle-label">启用云端打票</div>
+        <div class="hint" style="margin-top:2px;">启用后在业务请求缺票时触发云端预热。</div>
+      </div>
+      <label class="mint-switch">
+        <input type="checkbox" id="mintCloudEnabled" checked>
+        <span class="mint-slider"></span>
+      </label>
+    </div>
+
+    <div class="mint-toggle">
+      <div>
+        <div class="mint-toggle-label">仅观测，不注入</div>
+        <div class="hint" style="margin-top:2px;">dry_run 模式：仅记录上游响应，不改写。</div>
+      </div>
+      <label class="mint-switch">
+        <input type="checkbox" id="mintDryRun">
+        <span class="mint-slider"></span>
+      </label>
+    </div>
+
+    <div class="mint-field">
+      <label>云函数地址</label>
+      <input type="text" id="mintRelayURL" placeholder="https://chatgpt-relay-xxx.fcapp.run" autocomplete="off" spellcheck="false">
+      <div class="hint">HTTPS 地址，不含数字密码、查询参数或分段。</div>
+    </div>
+
+    <div class="mint-field">
+      <label>云函数前置代理</label>
+      <input type="text" id="mintRelayProxy" placeholder="留空直连，或 http://127.0.0.1:12080" autocomplete="off" spellcheck="false">
+      <div class="hint">只代理 插件 → 云函数；留空直连，失败不回退直连。</div>
+    </div>
+
+    <div class="mint-grid-2">
+      <div class="mint-field">
+        <label>打票协议</label>
+        <select id="mintTransport">
+          <option value="websocket" selected>WebSocket</option>
+          <option value="sse">SSE (HTTP)</option>
+        </select>
+      </div>
+      <div class="mint-field">
+        <label>目标网关 (路由)</label>
+        <input type="text" id="mintGateway" value="unified-88" placeholder="unified-88" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+
+    <div class="mint-grid-2">
+      <div class="mint-field">
+        <label>预期票长 (格式)</label>
+        <input type="number" id="mintTicketLen" value="780" min="200" max="2000">
+      </div>
+      <div class="mint-field">
+        <label>票有效期 / 秒</label>
+        <input type="number" id="mintTicketTTL" value="240" min="30" max="86400">
+      </div>
+    </div>
+
+    <details class="help-details" style="margin-top:10px;">
+      <summary>▶ 高级设置，环境变量与等待上限</summary>
+      <div class="mint-field" style="margin-top:10px;">
+        <label>云端访问密钥 (X-Relay-Key)</label>
+        <input type="text" id="mintRelayKey" placeholder="sk-..." autocomplete="off" spellcheck="false">
+      </div>
+      <div class="mint-grid-2">
+        <div class="mint-field">
+          <label>最大尝试次数</label>
+          <input type="number" id="mintMaxAttempts" value="24" min="1" max="100">
+        </div>
+        <div class="mint-field">
+          <label>全局超时 / 秒</label>
+          <input type="number" id="mintTimeoutSec" value="75" min="10" max="300">
+        </div>
+      </div>
+    </details>
+
+    <div class="mint-side-actions">
+      <button class="btn primary" id="btnSaveMintSettings" type="button">保存到 CPA</button>
+      <button class="btn" id="btnResetMintSettings" type="button">放弃改动</button>
+    </div>
+    <div class="hint" style="margin-top:12px; font-size:11.5px; color:var(--muted); line-height:1.4;">
+      已连接。保存会更新 CPA 的插件配置，历史票和日志不会伪造为新配置结果。
+    </div>
+  </div>
+</div> <!-- .mint-sidebar -->
+
+</div> <!-- .mint-layout -->
+
+<details class="help-details" style="margin-top:16px;"><summary>探测与业务处理说明</summary><p>主动探测直接请求上游，不修改 CPA 账号启用状态或代理配置，可与业务并行。首次采集后进入续期检查。探测会消耗账号额度；停止探测会停止主动续期，不影响已有模板的使用。</p></details>
 </section>
 <section aria-labelledby="tab-scope" hidden="" id="panel-scope" role="tabpanel">
 <div class="panel-card"><div class="panel-head"><div><h2>探测范围</h2><p class="subtitle">选择主动采集的账号与模型。范围变更不会清除已有模板。</p></div></div><div class="editor-columns" id="scopeColumns"><div class="scopecol">
@@ -3257,21 +3411,110 @@ function initDashboardTabs() {
 
 function renderOverview(d) {
   var role = $('headerRole');
-  role.textContent = d.role === 'business' ? '业务模式' : (d.role === 'probe' ? '探测模式' : '角色未知');
-  role.className = 'status-pill' + (d.role === 'business' ? ' is-ok' : '');
+  var mintOn = hasField(d, 'cloud_mint_enabled') ? d.cloud_mint_enabled : true;
+  role.textContent = mintOn ? '云端打票已启用' : '云端打票已暂停';
+  role.className = 'status-pill ' + (mintOn ? 'is-ok' : 'is-warn');
+
   var run = probeRunOf(d);
-  $('overviewProbe').textContent = !run ? '状态不可用' : run.running ? '探测运行中' : run.error ? '探测异常' : '探测待命';
-  $('overviewProbeNote').textContent = !run ? '当前服务未返回任务状态' : run.error ? '详情见下方探测活动' : run.running ? '主动采集与续期任务已启动' : run.finished_at ? '任务已停止，可手动启动' : '尚未启动主动探测';
-  $('overviewProbe').className = 'stat-value text' + (run && run.error ? ' warntext' : '');
-  $('overviewMode').textContent = d.inject_mode === 'always' ? '始终注入' : d.inject_mode === 'replace-only' ? '按长度替换' : '—';
-  $('overviewModeNote').textContent = d.role === 'probe' ? '探测模式 · 不改写请求' : d.dry_run ? '模拟运行 · 不改写请求' : '实际请求改写已启用';
-  var fixed = typeof d.probe_proxy_count === 'number' ? d.probe_proxy_count : null;
-  var rotating = typeof d.probe_proxy_rotating_count === 'number' ? d.probe_proxy_rotating_count : null;
-  $('overviewExits').textContent = fixed === null || rotating === null ? '—' : String(fixed + rotating);
-  $('overviewExitNote').textContent = fixed === null || rotating === null ? '当前服务未返回完整出口统计' : fixed === 0 && rotating === 0 ? '未配置代理 · 使用服务器出口' : fixed + ' 个静态出口 · ' + rotating + ' 个轮换入口';
+  $('overviewReady').textContent = (typeof d.targets_ready === 'number') ? d.targets_ready : (d.buckets ? d.buckets.filter(function(b){return b.ready;}).length : 0);
+  $('overviewProbe').textContent = !run ? '0' : run.running ? (run.total - run.done) : '0';
+  $('overviewMode').textContent = (d.config_errors && d.config_errors.length) ? d.config_errors.length : 0;
+  $('overviewExits').textContent = Array.isArray(d.observation_feed) ? Math.min(80, d.observation_feed.length) : '80';
+
+  // 同步右侧打票配置面板
+  if (!scope.mintDirty) {
+    if ($('mintCloudEnabled')) $('mintCloudEnabled').checked = mintOn;
+    if ($('mintDryRun')) $('mintDryRun').checked = !!d.dry_run;
+    if ($('mintRelayURL') && document.activeElement !== $('mintRelayURL')) {
+      $('mintRelayURL').value = d.cloud_relay_url || '';
+    }
+    if ($('mintRelayProxy') && document.activeElement !== $('mintRelayProxy')) {
+      $('mintRelayProxy').value = d.cloud_relay_proxy || '';
+    }
+    if ($('mintTransport')) $('mintTransport').value = d.cloud_relay_transport || 'websocket';
+    if ($('mintGateway') && document.activeElement !== $('mintGateway')) {
+      $('mintGateway').value = d.cloud_relay_gateway || 'unified-88';
+    }
+    if ($('mintTicketLen') && document.activeElement !== $('mintTicketLen')) {
+      $('mintTicketLen').value = d.template_length || 780;
+    }
+    if ($('mintTicketTTL') && document.activeElement !== $('mintTicketTTL')) {
+      $('mintTicketTTL').value = d.ttl_seconds || 240;
+    }
+    if ($('mintMaxAttempts') && document.activeElement !== $('mintMaxAttempts')) {
+      $('mintMaxAttempts').value = d.cloud_max_attempts || 24;
+    }
+    if ($('mintTimeoutSec') && document.activeElement !== $('mintTimeoutSec')) {
+      $('mintTimeoutSec').value = d.cloud_timeout_seconds || 75;
+    }
+  }
+}
+
+function doSaveMintSettings() {
+  var d = state.data;
+  if (!d) { notify('err', '还没拿到状态，稍后再试。'); return; }
+
+  var params = {
+    fields: 'mint_settings',
+    cloud_mint_enabled: $('mintCloudEnabled').checked ? 'true' : 'false',
+    cloud_relay_url: $('mintRelayURL').value.trim(),
+    cloud_relay_proxy: $('mintRelayProxy').value.trim(),
+    cloud_relay_transport: $('mintTransport').value,
+    cloud_relay_gateway: $('mintGateway').value.trim(),
+    template_length: $('mintTicketLen').value.trim(),
+    ttl_seconds: $('mintTicketTTL').value.trim(),
+    cloud_relay_key: $('mintRelayKey').value.trim(),
+    cloud_max_attempts: $('mintMaxAttempts').value.trim(),
+    cloud_timeout_seconds: $('mintTimeoutSec').value.trim()
+  };
+
+  confirmDialog({
+    title: '保存云端打票设置？',
+    confirmText: '保存到 CPA',
+    lines: [
+      { text: '目标云函数：' + (params.cloud_relay_url || '未设置') },
+      { text: '目标网关路由：' + params.cloud_relay_gateway + ' · 预期票长：' + params.template_length },
+      { text: '设置将立即写入插件配置并热生效。' }
+    ]
+  }).then(function(go) {
+    if (!go) return;
+    withBusy(function() {
+      return resAction('/ops/scope', params).then(function(r) {
+        if (r === null) return;
+        scope.mintDirty = false;
+        notify('ok', '打票配置已成功保存并同步到 CPA。');
+        return refresh();
+      });
+    });
+  });
+}
+
+function initMintControls() {
+  var btnSave = $('btnSaveMintSettings');
+  if (btnSave) btnSave.addEventListener('click', doSaveMintSettings);
+  var btnReset = $('btnResetMintSettings');
+  if (btnReset) btnReset.addEventListener('click', function() {
+    scope.mintDirty = false;
+    if (state.data) renderOverview(state.data);
+    notify('ok', '已还原当前配置。');
+  });
+  var btnScroll = $('btnScrollMint');
+  if (btnScroll) btnScroll.addEventListener('click', function() {
+    var sb = $('mintSidebar');
+    if (sb) sb.scrollIntoView({ behavior: 'smooth' });
+  });
+
+  ['mintCloudEnabled', 'mintDryRun', 'mintRelayURL', 'mintRelayProxy', 'mintTransport', 'mintGateway', 'mintTicketLen', 'mintTicketTTL', 'mintRelayKey', 'mintMaxAttempts', 'mintTimeoutSec'].forEach(function(id) {
+    var elem = $(id);
+    if (elem) {
+      elem.addEventListener('input', function() { scope.mintDirty = true; });
+      elem.addEventListener('change', function() { scope.mintDirty = true; });
+    }
+  });
 }
 
 initDashboardTabs();
+initMintControls();
 
 (function boot() {
   // 没有登录门，也没有任何需要密钥的动作：看数据、四个操作、读可选清单、保存
